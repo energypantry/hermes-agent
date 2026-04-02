@@ -39,6 +39,8 @@ Usage:
     hermes uninstall           Uninstall Hermes Agent
     hermes acp                 Run as an ACP server for editor integration
     hermes sessions browse     Interactive session picker with search
+    hermes policy-bias state list                 Inspect policy state dimensions
+    hermes policy-bias state updates              Show recent policy state updates
 
     hermes claw migrate --dry-run  # Preview migration without changes
 """
@@ -4813,6 +4815,45 @@ For more help on a command:
 
     pb_export = policy_bias_sub.add_parser("export", help="Export stable active biases for offline training or audit")
     pb_export.add_argument("--min-confidence", type=float, default=0.55, help="Minimum confidence threshold")
+
+    pb_state = policy_bias_sub.add_parser(
+        "state",
+        help="Inspect and govern V2 policy state",
+        description="List, inspect, review updates, rebuild, reset, or explain policy-state dimensions",
+    )
+    state_sub = pb_state.add_subparsers(dest="state_action")
+
+    state_list = state_sub.add_parser("list", help="List policy state dimensions")
+    state_list.add_argument("--status", choices=["active", "shadow", "disabled", "archived"], help="Filter by status")
+    state_list.add_argument("--limit", type=int, default=50, help="Max dimensions to show")
+    state_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    state_inspect = state_sub.add_parser("inspect", help="Inspect a single policy state dimension")
+    state_inspect.add_argument("dimension_key", help="Policy state dimension key to inspect")
+    state_inspect.add_argument("--limit", type=int, default=10, help="Max recent updates to show")
+    state_inspect.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    state_updates = state_sub.add_parser(
+        "updates",
+        aliases=["recent"],
+        help="Show recent policy state updates",
+    )
+    state_updates.add_argument("--dimension-key", help="Filter updates to a single dimension key")
+    state_updates.add_argument("--limit", type=int, default=20, help="Max updates to show")
+    state_updates.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    state_rebuild = state_sub.add_parser("rebuild", help="Rebuild policy state from stored moments")
+    state_rebuild.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    state_reset = state_sub.add_parser("reset", help="Reset policy state for one dimension or all dimensions")
+    state_reset.add_argument("dimension_key", nargs="?", help="Optional dimension key to reset")
+    state_reset.add_argument("--all", action="store_true", help="Reset all dimensions for the profile")
+    state_reset.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
+    state_explain = state_sub.add_parser("explain", help="Explain how policy state affected a decision")
+    state_explain.add_argument("trace_id", nargs="?", help="Decision trace ID to explain")
+    state_explain.add_argument("--limit", type=int, default=10, help="Max evidence rows to show")
+    state_explain.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
 
     def cmd_policy_bias(args):
         from hermes_cli.policy_bias_cmd import run_policy_bias_command

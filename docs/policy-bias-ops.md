@@ -53,6 +53,25 @@ hermes policy-bias rollback <bias_id> <version>
 hermes policy-bias export --min-confidence 0.55
 ```
 
+### V2 Policy State
+
+The V2 foundation introduces a separate policy-state governance surface alongside the existing bias commands:
+
+```bash
+hermes policy-bias state list
+hermes policy-bias state list --status active --json
+hermes policy-bias state inspect <dimension_key>
+hermes policy-bias state inspect <dimension_key> --json
+hermes policy-bias state updates --limit 20
+hermes policy-bias state updates --dimension-key inspect_tendency
+hermes policy-bias state rebuild
+hermes policy-bias state reset inspect_tendency
+hermes policy-bias state reset --all
+hermes policy-bias state explain <trace_id>
+```
+
+These commands coexist with V1 bias governance and now speak to the policy-state backend directly. They still fail gracefully in mixed deployments where the newer policy-state store APIs are unavailable.
+
 ## What To Watch
 
 Useful log events:

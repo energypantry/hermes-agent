@@ -9,7 +9,14 @@ from agent.policy_bias.engine import PolicyBiasEngine
 from agent.policy_bias.governance import audit_bias_boundaries, inspect_bias, rebuild_biases
 from agent.policy_bias.injector import build_decision_priors
 from agent.policy_bias.migrations import BASE_SCHEMA_SQL, BASE_SCHEMA_VERSION, SCHEMA_VERSION
-from agent.policy_bias.models import BIAS_SCOPES, PolicyBias, PolicyBiasConfig, PolicyMoment, now_ts
+from agent.policy_bias.models import (
+    BIAS_SCOPES,
+    PolicyBias,
+    PolicyBiasConfig,
+    PolicyMoment,
+    PolicyStateDimension,
+    now_ts,
+)
 from agent.policy_bias.planner_hooks import evaluate_risk_gate, rerank_tools
 from agent.policy_bias.retrieval import retrieve_biases
 from agent.policy_bias.store import PolicyBiasStore
@@ -137,6 +144,37 @@ def _make_moment(
     )
 
 
+def _make_state_dimension(
+    profile_id: str,
+    dimension_key: str,
+    *,
+    value: float = 0.75,
+    confidence: float = 0.82,
+    status: str = "active",
+    updated_at: float | None = None,
+) -> PolicyStateDimension:
+    ts = updated_at if updated_at is not None else now_ts()
+    return PolicyStateDimension(
+        id=f"state_{dimension_key}_{int(ts * 1000)}",
+        profile_id=profile_id,
+        dimension_key=dimension_key,
+        value=value,
+        confidence=confidence,
+        support_count=4,
+        avg_reward=0.62,
+        recency_score=1.0,
+        decay_rate=0.01,
+        status=status,
+        source_moment_ids=[f"moment_{dimension_key}_1"],
+        created_at=ts,
+        updated_at=ts,
+        last_triggered_at=None,
+        trigger_count=0,
+        rollback_parent_id=None,
+        version=1,
+    )
+
+
 def _simulate_repo_success(engine: PolicyBiasEngine, *, session_id: str, turn_index: int) -> None:
     tool_defs = _tool_defs("patch", "read_file", "web_search")
     ctx = engine.begin_turn(
@@ -200,8 +238,101 @@ def test_store_migrates_v1_schema_to_current(tmp_path):
         assert "disabled_reason" in columns
         assert "decision_traces" in tables
         assert "response_effects" in trace_columns
+        assert "policy_state_dimensions" in tables
+        assert "policy_state_updates" in tables
     finally:
         store.close()
+
+
+def test_policy_state_dimension_round_trip(tmp_path):
+    store = PolicyBiasStore(db_path=tmp_path / "policy_bias.db")
+    try:
+        dimension = _make_state_dimension(
+            "profile:test",
+            "inspect_tendency",
+            value=0.78,
+        )
+        store.upsert_policy_state_dimension(dimension)
+
+        restored = store.find_policy_state_dimension("profile:test", "inspect_tendency")
+        listed = store.list_policy_state_dimensions("profile:test", statuses=["active"])
+
+        assert restored is not None
+        assert restored.dimension_key == "inspect_tendency"
+        assert restored.value == 0.78
+        assert [item.dimension_key for item in listed] == ["inspect_tendency"]
+    finally:
+        store.close()
+
+
+def test_policy_state_updates_apply_from_moment_and_rebuild(tmp_path):
+    store = PolicyBiasStore(db_path=tmp_path / "policy_bias.db")
+    try:
+        moment = _make_moment(
+            "profile:test",
+            "planning.inspect_before_edit",
+            reward=0.82,
+            timestamp=now_ts() - 5,
+        )
+        store.add_moment(moment)
+
+        updates = store.apply_policy_state_from_moment(moment)
+        restored = store.find_policy_state_dimension("profile:test", "inspect_tendency")
+        recent_updates = store.list_policy_state_updates(
+            profile_id="profile:test",
+            dimension_key="inspect_tendency",
+            limit=5,
+        )
+        rebuilt = store.rebuild_policy_state(
+            profile_id="profile:test",
+            persist=True,
+            clear_existing=True,
+        )
+
+        assert updates
+        assert any(update.dimension_key == "inspect_tendency" for update in updates)
+        assert restored is not None
+        assert restored.value > 0
+        assert recent_updates
+        assert recent_updates[0].moment_id == moment.id
+        assert any(dimension.dimension_key == "inspect_tendency" for dimension in rebuilt.dimensions)
+    finally:
+        store.close()
+
+
+def test_policy_state_reset_and_explain_flow(tmp_path):
+    engine, store = _make_engine(tmp_path)
+    try:
+        store.upsert_policy_state_dimension(
+            _make_state_dimension(engine.profile_id, "inspect_tendency", value=0.74)
+        )
+        ctx = engine.begin_turn(
+            session_id="session-1",
+            turn_index=1,
+            user_message="Review the repo change before editing.",
+            platform="cli",
+            available_tools=["patch", "read_file"],
+            tool_defs=_tool_defs("patch", "read_file"),
+        )
+
+        explanation = store.explain_policy_state_decision(
+            profile_id=engine.profile_id,
+            trace_id=ctx.trace_id,
+        )
+        reset_result = store.reset_policy_state(
+            profile_id=engine.profile_id,
+            dimension_key="inspect_tendency",
+        )
+
+        assert explanation["trace_id"] == ctx.trace_id
+        assert any(
+            item["dimension_key"] == "inspect_tendency"
+            for item in explanation["active_dimensions"]
+        )
+        assert reset_result["deleted_dimensions"] == 1
+        assert store.find_policy_state_dimension(engine.profile_id, "inspect_tendency") is None
+    finally:
+        engine.close()
 
 
 def test_delete_biases_respects_status_filter(tmp_path):
@@ -447,6 +578,59 @@ def test_planner_reranking_and_risk_gate_apply_active_biases():
     assert simulated.decision == "simulate"
 
 
+def test_policy_state_reranking_and_risk_gate_apply_without_bias_objects():
+    policy_state = [
+        _make_state_dimension("profile:test", "inspect_tendency", value=0.85),
+        _make_state_dimension("profile:test", "risk_aversion", value=0.70),
+        _make_state_dimension("profile:test", "local_first_tendency", value=0.90),
+        _make_state_dimension("profile:test", "decomposition_tendency", value=0.60),
+        _make_state_dimension("profile:test", "retry_switch_tendency", value=0.80),
+    ]
+    ranked_tools, deltas, _planner_effects = rerank_tools(
+        _tool_defs("web_search", "patch", "read_file", "todo"),
+        [],
+        user_message="Fix the local repo and avoid risky paths",
+        task_type="repo_modification",
+        platform="cli",
+        recent_failed_tools=["patch"],
+        policy_state=policy_state,
+    )
+
+    ranked_names = [tool["function"]["name"] for tool in ranked_tools]
+    assert ranked_names[:2] == ["read_file", "todo"]
+    assert ranked_names[-1] == "patch"
+    assert any(
+        delta.tool_name == "patch" and delta.weight_delta < 0
+        for delta in deltas
+    )
+
+    blocked = evaluate_risk_gate(
+        "send_message",
+        {"message": "done"},
+        [],
+        require_inspect_first=True,
+        has_recent_inspection=False,
+        user_message="Send a message to the customer",
+        platform="cli",
+        policy_state=policy_state,
+    )
+    simulated = evaluate_risk_gate(
+        "browser_click",
+        {"selector": "#submit"},
+        [],
+        require_inspect_first=True,
+        has_recent_inspection=False,
+        user_message="Click submit",
+        platform="cli",
+        policy_state=policy_state,
+    )
+
+    assert blocked is not None
+    assert blocked.decision == "confirm"
+    assert simulated is not None
+    assert simulated.decision == "simulate"
+
+
 def test_repeated_success_promotes_active_bias_and_influences_next_turn(tmp_path):
     engine, store = _make_engine(tmp_path)
     try:
@@ -472,6 +656,38 @@ def test_repeated_success_promotes_active_bias_and_influences_next_turn(tmp_path
         assert "Decision Priors" in next_ctx.decision_priors
         assert "inspect file structure and conventions before editing" in next_ctx.decision_priors
         assert next_ctx.ranked_tools[0]["function"]["name"] == "read_file"
+    finally:
+        engine.close()
+
+
+def test_policy_state_influences_begin_turn_without_v1_bias_objects(tmp_path):
+    engine, store = _make_engine(tmp_path)
+    try:
+        store.upsert_policy_state_dimension(
+            _make_state_dimension(engine.profile_id, "inspect_tendency", value=0.82)
+        )
+        store.upsert_policy_state_dimension(
+            _make_state_dimension(engine.profile_id, "directness_tendency", value=0.77)
+        )
+        store.upsert_policy_state_dimension(
+            _make_state_dimension(engine.profile_id, "findings_first_tendency", value=0.66)
+        )
+        ctx = engine.begin_turn(
+            session_id="session-1",
+            turn_index=1,
+            user_message="Review this bug and give findings first.",
+            platform="cli",
+            available_tools=["patch", "read_file"],
+            tool_defs=_tool_defs("patch", "read_file"),
+        )
+
+        assert ctx.active_biases == []
+        assert ctx.decision_priors.startswith("Decision Priors")
+        assert "state=inspect_tendency" in ctx.decision_priors
+        assert ctx.ranked_tools[0]["function"]["name"] == "read_file"
+        assert ctx.metadata["response_controls"]["strip_leading_acknowledgement"] is True
+        assert ctx.metadata["response_controls"]["findings_first_heading"] is True
+        assert ctx.metadata["policy_state_dimensions"]
     finally:
         engine.close()
 

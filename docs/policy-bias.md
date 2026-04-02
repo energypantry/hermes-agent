@@ -202,3 +202,22 @@ Stable active biases can be exported as compact supervision records. The intende
 3. join with decision traces and success outcomes
 4. build a high-signal corpus for offline preference / policy training
 5. keep online Policy Bias Engine as the live, auditable control plane
+
+## V2 Policy State Foundation
+
+The next evolution path is a long-lived `PolicyState` layer that sits alongside V1 biases rather than replacing them outright.
+
+V1 remains the source of:
+
+- explicit, auditable bias objects
+- retrieval and prompt translation
+- current planner/tool/risk hooks
+- governance and rollback for named policy priors
+
+V2 adds:
+
+- persistent policy dimensions such as inspect tendency, risk aversion, and directness budget
+- state-first runtime control before prompt translation
+- a separate audit trail for low-bandwidth policy updates
+
+Operationally, the CLI now exposes a `policy-bias state ...` subtree backed by the new policy-state store. It coexists with the current V1 bias commands, and still degrades gracefully if a deployment is missing the newer backend methods.

@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-from .models import PolicyBias
+from .models import PolicyBias, PolicyStateDimension
+from .state_runtime import dimension_map
 
 _LEADING_ACK_PATTERNS = (
     "got it",
@@ -54,13 +55,19 @@ def derive_response_controls(
     *,
     task_type: str,
     user_message: str,
+    policy_state: Iterable[PolicyStateDimension] | None = None,
 ) -> dict[str, object]:
     keys = {
         bias.bias_candidate_key or ""
         for bias in biases
     }
+    state = dimension_map(policy_state)
     controls: dict[str, object] = {}
     if {"communication.concise_first", "user_specific.directness_over_fluff"} & keys:
+        controls["strip_leading_acknowledgement"] = True
+        controls["drop_trailing_offer"] = True
+    directness = float(state.get("directness_tendency").value) if state.get("directness_tendency") else 0.0
+    if directness >= 0.35:
         controls["strip_leading_acknowledgement"] = True
         controls["drop_trailing_offer"] = True
     if "workflow_specific.structured_debugging_output" in keys and _looks_debug_request(
@@ -68,7 +75,24 @@ def derive_response_controls(
         task_type=task_type,
     ):
         controls["findings_first_heading"] = True
+    findings_first = (
+        float(state.get("findings_first_tendency").value)
+        if state.get("findings_first_tendency")
+        else 0.0
+    )
+    if findings_first >= 0.35 and _looks_debug_request(
+        user_message=user_message,
+        task_type=task_type,
+    ):
+        controls["findings_first_heading"] = True
     if "user_specific.one_step_at_a_time" in keys:
+        controls["prefer_single_step"] = True
+    single_step = (
+        float(state.get("single_step_tendency").value)
+        if state.get("single_step_tendency")
+        else 0.0
+    )
+    if single_step >= 0.35:
         controls["prefer_single_step"] = True
     return controls
 

@@ -33,6 +33,8 @@ from .scoring import (
     is_correction_message,
     side_effect_level_for_tool,
 )
+from .state_runtime import evidence_summary as state_evidence_summary
+from .state_runtime import serialize_dimensions
 from .store import PolicyBiasStore
 from .synthesis import synthesize_bias
 
@@ -133,9 +135,11 @@ class PolicyBiasEngine:
             available_tools=available_tools,
             include_shadow=True,
         )
+        state_dimensions = self._list_policy_state_dimensions(include_shadow=True)
         decision_priors, injected_ids = build_decision_priors(
             retrieval.active_biases,
             max_prompt_tokens=self.config.max_prompt_tokens,
+            policy_state=state_dimensions,
         )
         ranked_tools, tool_deltas, planner_effects = rerank_tools(
             tool_defs,
@@ -144,7 +148,10 @@ class PolicyBiasEngine:
             task_type=task_type,
             platform=platform or "cli",
             recent_failed_tools=recent_failed_tools,
+            policy_state=state_dimensions,
         )
+        evidence_items = [bias_summary(bias) for bias in retrieval.active_biases]
+        evidence_items.extend(state_evidence_summary(state_dimensions))
         trace = DecisionTrace(
             id=new_id("trace"),
             profile_id=self.profile_id,
@@ -163,7 +170,7 @@ class PolicyBiasEngine:
             ],
             risk_actions=[],
             response_effects=[],
-            evidence_summary=[bias_summary(bias) for bias in retrieval.active_biases],
+            evidence_summary=evidence_items,
         )
         self.store.save_decision_trace(trace)
         for bias in retrieval.active_biases:
@@ -199,14 +206,18 @@ class PolicyBiasEngine:
                 "planner_effects": planner_effects,
                 "turn_tool_names": [],
                 "risk_actions": [],
+                "_policy_state_dimensions": state_dimensions,
+                "policy_state_dimensions": serialize_dimensions(state_dimensions),
                 "response_controls": derive_response_controls(
                     retrieval.active_biases,
                     task_type=task_type,
                     user_message=user_message,
+                    policy_state=state_dimensions,
                 ),
                 "response_effects": [],
                 "blocked_tool_names": [],
                 "injected_bias_ids": list(injected_ids),
+                "evidence_summary": evidence_items,
             },
         )
 
@@ -221,6 +232,7 @@ class PolicyBiasEngine:
             parsed_calls,
             context.active_biases,
             recent_failed_tools=context.metadata.get("recent_failed_tools", []),
+            policy_state=context.metadata.get("_policy_state_dimensions", []),
         )
         if planner_effects:
             context.metadata.setdefault("planner_effects", []).extend(planner_effects)
@@ -244,6 +256,7 @@ class PolicyBiasEngine:
             has_recent_inspection=bool(context.metadata.get("has_recent_inspection")),
             user_message=context.user_message,
             platform=context.platform,
+            policy_state=context.metadata.get("_policy_state_dimensions", []),
         )
         if risk_action is not None:
             context.metadata.setdefault("risk_actions", []).append(
@@ -622,6 +635,7 @@ class PolicyBiasEngine:
         if not self.is_enabled():
             return
         self.store.add_moment(moment)
+        self._apply_policy_state_updates(moment)
         if self.config.log_bias_triggers:
             logger.info(
                 "Policy bias moment created id=%s class=%s outcome=%s candidate=%s",
@@ -676,7 +690,10 @@ class PolicyBiasEngine:
             ],
             risk_actions=context.metadata.get("risk_actions", []),
             response_effects=context.metadata.get("response_effects", []),
-            evidence_summary=[bias_summary(bias) for bias in context.active_biases],
+            evidence_summary=context.metadata.get(
+                "evidence_summary",
+                [bias_summary(bias) for bias in context.active_biases],
+            ),
         )
         self.store.save_decision_trace(trace)
 
@@ -689,6 +706,77 @@ class PolicyBiasEngine:
             return
         context.metadata.setdefault("response_effects", []).extend(response_effects)
         self._save_trace_update(context)
+
+    def _list_policy_state_dimensions(self, *, include_shadow: bool) -> list[object]:
+        if not self.is_enabled():
+            return []
+        store = self.store
+        if store is None:
+            return []
+        method_names = (
+            "list_policy_state_dimensions",
+            "list_policy_state",
+            "list_state_dimensions",
+        )
+        statuses = ["active", "shadow"] if include_shadow else ["active"]
+        for method_name in method_names:
+            method = getattr(store, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                return list(method(self.profile_id, statuses=statuses))
+            except TypeError:
+                try:
+                    return list(method(profile_id=self.profile_id, statuses=statuses))
+                except TypeError:
+                    try:
+                        return list(method(self.profile_id))
+                    except Exception as exc:
+                        logger.debug("Policy state listing via %s failed: %s", method_name, exc)
+                        return []
+            except Exception as exc:
+                logger.debug("Policy state listing via %s failed: %s", method_name, exc)
+                return []
+        return []
+
+    def _apply_policy_state_updates(self, moment: PolicyMoment) -> None:
+        if not self.is_enabled():
+            return
+        store = self.store
+        if store is None:
+            return
+        method_names = (
+            "apply_policy_state_from_moment",
+            "apply_moment_state_updates",
+            "record_policy_state_from_moment",
+            "update_policy_state_from_moment",
+        )
+        for method_name in method_names:
+            method = getattr(store, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                updates = method(moment)
+            except TypeError:
+                try:
+                    updates = method(moment=moment)
+                except Exception as exc:
+                    logger.debug("Policy state update via %s failed: %s", method_name, exc)
+                    return
+            except Exception as exc:
+                logger.debug("Policy state update via %s failed: %s", method_name, exc)
+                return
+            if self.config.log_bias_triggers and updates:
+                logger.info(
+                    "Policy state updated moment=%s updates=%s",
+                    moment.id,
+                    [
+                        getattr(update, "dimension_key", None)
+                        or (update.get("dimension_key") if isinstance(update, dict) else None)
+                        for update in updates
+                    ],
+                )
+            return
 
     @staticmethod
     def _tool_result_failed(result: str) -> bool:

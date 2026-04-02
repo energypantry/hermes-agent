@@ -5726,32 +5726,56 @@ class AIAgent:
     def _policy_requires_sequential_tool_batch(self, tool_calls) -> bool:
         """Force sequential execution when inspect-first biases conflict with parallelism."""
         ctx = getattr(self, "_policy_turn_context", None)
-        if not ctx or not ctx.active_biases:
+        if not ctx:
             return False
 
         keys = {
             bias.bias_candidate_key or ""
             for bias in ctx.active_biases
         }
+        state_map = {
+            getattr(dimension, "dimension_key", ""): float(getattr(dimension, "value", 0.0) or 0.0)
+            for dimension in ctx.metadata.get("_policy_state_dimensions", [])
+        }
         if not {
             "planning.inspect_before_edit",
             "risk.inspect_before_execute",
             "workflow_specific.decompose_before_act",
             "user_specific.one_step_at_a_time",
-        } & keys:
+        } & keys and not any(
+            state_map.get(key, 0.0) >= 0.35
+            for key in (
+                "inspect_tendency",
+                "risk_aversion",
+                "decomposition_tendency",
+                "single_step_tendency",
+            )
+        ):
             return False
 
         names = [tc.function.name for tc in tool_calls]
-        if "user_specific.one_step_at_a_time" in keys and len(names) > 1:
+        if (
+            "user_specific.one_step_at_a_time" in keys
+            or state_map.get("single_step_tendency", 0.0) >= 0.35
+        ) and len(names) > 1:
             return True
-        if "workflow_specific.decompose_before_act" in keys:
+        if (
+            "workflow_specific.decompose_before_act" in keys
+            or state_map.get("decomposition_tendency", 0.0) >= 0.35
+        ):
             has_planning = any(name in {"todo", "clarify"} for name in names)
             has_execution = any(name in {"write_file", "patch", "terminal", "browser_click", "browser_type", "browser_press", "send_message", "cronjob", "ha_call_service"} for name in names)
             if has_planning and has_execution:
                 return True
         has_inspect = any(name in {"read_file", "search_files", "browser_snapshot", "web_search", "web_extract"} for name in names)
         has_mutating = any(name in {"write_file", "patch", "terminal", "browser_click", "browser_type", "browser_press", "send_message", "cronjob", "ha_call_service"} for name in names)
-        return has_inspect and has_mutating
+        if has_inspect and has_mutating:
+            return True
+        if state_map.get("inspect_tendency", 0.0) >= 0.45 and has_mutating and len(names) > 1:
+            return True
+        if state_map.get("risk_aversion", 0.0) >= 0.55 and has_mutating and len(names) > 1:
+            return True
+        return False
 
     def _apply_policy_response_controls(self, final_response: str, messages: list[dict]) -> str:
         """Apply deterministic response-policy hooks after generation."""

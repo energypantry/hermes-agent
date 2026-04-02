@@ -14,7 +14,21 @@ from typing import Any, Callable, Iterable, Optional, TypeVar
 from hermes_constants import get_hermes_home
 
 from .migrations import BASE_SCHEMA_SQL, BASE_SCHEMA_VERSION, MIGRATIONS, SCHEMA_VERSION
-from .models import BiasHistoryEntry, DecisionTrace, PolicyBias, PolicyMoment, new_id
+from .models import (
+    BiasHistoryEntry,
+    DecisionTrace,
+    PolicyBias,
+    PolicyMoment,
+    PolicyStateDimension,
+    PolicyStateRebuildResult,
+    PolicyStateUpdate,
+    new_id,
+)
+from .state_updates import (
+    apply_policy_state_update as apply_policy_state_delta,
+    derive_policy_state_updates_from_moment,
+    build_policy_state_from_moments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -517,6 +531,648 @@ class PolicyBiasStore:
         params.append(max(1, int(limit)))
         rows = self._conn.execute(sql, params).fetchall()
         return [self._trace_from_row(row) for row in rows]
+
+    def get_policy_state_dimension(self, dimension_id: str) -> Optional[PolicyStateDimension]:
+        row = self._conn.execute(
+            "SELECT * FROM policy_state_dimensions WHERE id = ?",
+            (dimension_id,),
+        ).fetchone()
+        return self._policy_state_dimension_from_row(row) if row else None
+
+    def inspect_policy_state_dimension(
+        self,
+        *,
+        profile_id: str,
+        dimension_key: str,
+    ) -> Optional[PolicyStateDimension]:
+        return self.find_policy_state_dimension(profile_id, dimension_key)
+
+    def find_policy_state_dimension(
+        self,
+        profile_id: str,
+        dimension_key: str,
+    ) -> Optional[PolicyStateDimension]:
+        row = self._conn.execute(
+            """
+            SELECT * FROM policy_state_dimensions
+            WHERE profile_id = ? AND dimension_key = ?
+            LIMIT 1
+            """,
+            (profile_id, dimension_key),
+        ).fetchone()
+        return self._policy_state_dimension_from_row(row) if row else None
+
+    def list_policy_state_dimensions(
+        self,
+        profile_id: str,
+        *,
+        statuses: Optional[Iterable[str]] = None,
+        limit: int = 100,
+    ) -> list[PolicyStateDimension]:
+        sql = "SELECT * FROM policy_state_dimensions WHERE profile_id = ?"
+        params: list[Any] = [profile_id]
+        if statuses:
+            status_list = list(statuses)
+            placeholders = ", ".join("?" for _ in status_list)
+            sql += f" AND status IN ({placeholders})"
+            params.extend(status_list)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._policy_state_dimension_from_row(row) for row in rows]
+
+    def upsert_policy_state_dimension(self, dimension: PolicyStateDimension) -> str:
+        existing = None
+        if dimension.id:
+            existing = self.get_policy_state_dimension(dimension.id)
+        if existing is None:
+            existing = self.find_policy_state_dimension(dimension.profile_id, dimension.dimension_key)
+
+        def _do(conn: sqlite3.Connection) -> str:
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO policy_state_dimensions (
+                        id, profile_id, dimension_key, value, confidence, support_count,
+                        avg_reward, recency_score, decay_rate, status, source_moment_ids,
+                        created_at, updated_at, last_triggered_at, trigger_count,
+                        rollback_parent_id, version, status_note
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    self._policy_state_dimension_sql_values(dimension),
+                )
+                return dimension.id
+
+            updated = PolicyStateDimension(
+                id=existing.id,
+                profile_id=dimension.profile_id,
+                dimension_key=dimension.dimension_key,
+                value=dimension.value,
+                confidence=dimension.confidence,
+                support_count=dimension.support_count,
+                avg_reward=dimension.avg_reward,
+                recency_score=dimension.recency_score,
+                decay_rate=dimension.decay_rate,
+                status=dimension.status,
+                source_moment_ids=dimension.source_moment_ids,
+                created_at=existing.created_at,
+                updated_at=dimension.updated_at,
+                last_triggered_at=dimension.last_triggered_at,
+                trigger_count=dimension.trigger_count,
+                rollback_parent_id=dimension.rollback_parent_id,
+                version=max(existing.version + 1, dimension.version),
+                status_note=dimension.status_note,
+            )
+            conn.execute(self._policy_state_dimension_update_sql(), self._policy_state_dimension_update_values(updated))
+            return updated.id
+
+        return self._execute_write(_do)
+
+    def delete_policy_state_dimensions(
+        self,
+        profile_id: str,
+        *,
+        statuses: Optional[Iterable[str]] = None,
+    ) -> int:
+        status_list = list(statuses) if statuses else None
+
+        def _do(conn: sqlite3.Connection) -> int:
+            sql = "DELETE FROM policy_state_dimensions WHERE profile_id = ?"
+            params: list[Any] = [profile_id]
+            if status_list:
+                placeholders = ", ".join("?" for _ in status_list)
+                sql += f" AND status IN ({placeholders})"
+                params.extend(status_list)
+            cur = conn.execute(sql, params)
+            return cur.rowcount or 0
+
+        return self._execute_write(_do)
+
+    def get_policy_state_update(self, update_id: str) -> Optional[PolicyStateUpdate]:
+        row = self._conn.execute(
+            "SELECT * FROM policy_state_updates WHERE id = ?",
+            (update_id,),
+        ).fetchone()
+        return self._policy_state_update_from_row(row) if row else None
+
+    def list_recent_policy_state_updates(
+        self,
+        profile_id: str,
+        *,
+        dimension_key: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[PolicyStateUpdate]:
+        sql = "SELECT * FROM policy_state_updates WHERE profile_id = ?"
+        params: list[Any] = [profile_id]
+        if dimension_key:
+            sql += " AND dimension_key = ?"
+            params.append(dimension_key)
+        sql += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._policy_state_update_from_row(row) for row in rows]
+
+    def list_policy_state_updates(
+        self,
+        *,
+        profile_id: str,
+        dimension_key: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[PolicyStateUpdate]:
+        return self.list_recent_policy_state_updates(
+            profile_id,
+            dimension_key=dimension_key,
+            limit=limit,
+        )
+
+    def record_policy_state_update(self, update: PolicyStateUpdate) -> str:
+        def _do(conn: sqlite3.Connection) -> str:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO policy_state_updates (
+                    id, profile_id, dimension_id, dimension_key, moment_id, session_id,
+                    timestamp, task_type, platform, decision_class, outcome_class,
+                    signal_type, delta, value_before, value_after, confidence_before,
+                    confidence_after, support_delta, reward_score, reason,
+                    source_moment_ids, evidence_refs, update_source, bias_candidate_key,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._policy_state_update_sql_values(update),
+            )
+            return update.id
+
+        return self._execute_write(_do)
+
+    def apply_policy_state_update(self, update: PolicyStateUpdate) -> str:
+        def _do(conn: sqlite3.Connection) -> str:
+            row = None
+            if update.dimension_id:
+                row = conn.execute(
+                    "SELECT * FROM policy_state_dimensions WHERE id = ?",
+                    (update.dimension_id,),
+                ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT * FROM policy_state_dimensions
+                    WHERE profile_id = ? AND dimension_key = ?
+                    LIMIT 1
+                    """,
+                    (update.profile_id, update.dimension_key),
+                ).fetchone()
+
+            if row is None:
+                current = PolicyStateDimension(
+                    id=update.dimension_id or new_id("psd"),
+                    profile_id=update.profile_id,
+                    dimension_key=update.dimension_key,
+                    value=update.value_before,
+                    confidence=update.confidence_before,
+                    support_count=max(0, update.support_delta - 1),
+                    avg_reward=update.reward_score,
+                    recency_score=0.0,
+                    decay_rate=0.01,
+                    status="active",
+                    source_moment_ids=list(update.source_moment_ids),
+                    created_at=update.created_at,
+                    updated_at=update.timestamp,
+                    last_triggered_at=None,
+                    trigger_count=0,
+                    rollback_parent_id=None,
+                    version=1,
+                    status_note=None,
+                )
+            else:
+                current = self._policy_state_dimension_from_row(row)
+
+            updated = apply_policy_state_delta(current, update)
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO policy_state_updates (
+                    id, profile_id, dimension_id, dimension_key, moment_id, session_id,
+                    timestamp, task_type, platform, decision_class, outcome_class,
+                    signal_type, delta, value_before, value_after, confidence_before,
+                    confidence_after, support_delta, reward_score, reason,
+                    source_moment_ids, evidence_refs, update_source, bias_candidate_key,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._policy_state_update_sql_values(update),
+            )
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO policy_state_dimensions (
+                        id, profile_id, dimension_key, value, confidence, support_count,
+                        avg_reward, recency_score, decay_rate, status, source_moment_ids,
+                        created_at, updated_at, last_triggered_at, trigger_count,
+                        rollback_parent_id, version, status_note
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    self._policy_state_dimension_sql_values(updated),
+                )
+            else:
+                conn.execute(
+                    self._policy_state_dimension_update_sql(),
+                    self._policy_state_dimension_update_values(updated),
+                )
+            return updated.id
+
+        return self._execute_write(_do)
+
+    def apply_policy_state_from_moment(
+        self,
+        moment: PolicyMoment,
+    ) -> list[PolicyStateUpdate]:
+        def _do(conn: sqlite3.Connection) -> list[PolicyStateUpdate]:
+            rows = conn.execute(
+                """
+                SELECT * FROM policy_state_dimensions
+                WHERE profile_id = ?
+                ORDER BY updated_at DESC
+                """,
+                (moment.profile_id,),
+            ).fetchall()
+            state_by_key = {
+                row["dimension_key"]: self._policy_state_dimension_from_row(row)
+                for row in rows
+            }
+            updates = derive_policy_state_updates_from_moment(moment, state_by_key)
+            for update in updates:
+                current = state_by_key.get(update.dimension_key)
+                if current is None:
+                    current = PolicyStateDimension(
+                        id=update.dimension_id or new_id("psd"),
+                        profile_id=update.profile_id,
+                        dimension_key=update.dimension_key,
+                        value=update.value_before,
+                        confidence=update.confidence_before,
+                        support_count=max(0, update.support_delta - 1),
+                        avg_reward=update.reward_score,
+                        recency_score=0.0,
+                        decay_rate=0.01,
+                        status="active",
+                        source_moment_ids=list(update.source_moment_ids),
+                        created_at=update.created_at,
+                        updated_at=update.timestamp,
+                        last_triggered_at=None,
+                        trigger_count=0,
+                        rollback_parent_id=None,
+                        version=1,
+                        status_note=None,
+                    )
+                updated = apply_policy_state_delta(current, update)
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO policy_state_updates (
+                        id, profile_id, dimension_id, dimension_key, moment_id, session_id,
+                        timestamp, task_type, platform, decision_class, outcome_class,
+                        signal_type, delta, value_before, value_after, confidence_before,
+                        confidence_after, support_delta, reward_score, reason,
+                        source_moment_ids, evidence_refs, update_source, bias_candidate_key,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    self._policy_state_update_sql_values(update),
+                )
+                if update.dimension_key in state_by_key:
+                    conn.execute(
+                        self._policy_state_dimension_update_sql(),
+                        self._policy_state_dimension_update_values(updated),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO policy_state_dimensions (
+                            id, profile_id, dimension_key, value, confidence, support_count,
+                            avg_reward, recency_score, decay_rate, status, source_moment_ids,
+                            created_at, updated_at, last_triggered_at, trigger_count,
+                            rollback_parent_id, version, status_note
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        self._policy_state_dimension_sql_values(updated),
+                    )
+                state_by_key[update.dimension_key] = updated
+            return updates
+
+        return self._execute_write(_do)
+
+    def rebuild_policy_state_from_moments(
+        self,
+        profile_id: str,
+        *,
+        persist: bool = False,
+        clear_existing: bool = False,
+    ) -> PolicyStateRebuildResult:
+        moments = self.iter_all_moments(profile_id)
+        current_dimensions = {
+            dimension.dimension_key: dimension
+            for dimension in self.list_policy_state_dimensions(profile_id, limit=1000)
+        }
+        initial_state = {} if clear_existing else current_dimensions
+        rebuilt = build_policy_state_from_moments(moments, initial_state_by_key=initial_state)
+        if not persist:
+            return rebuilt
+
+        def _do(conn: sqlite3.Connection) -> PolicyStateRebuildResult:
+            if clear_existing:
+                conn.execute(
+                    "DELETE FROM policy_state_updates WHERE profile_id = ?",
+                    (profile_id,),
+                )
+                conn.execute(
+                    "DELETE FROM policy_state_dimensions WHERE profile_id = ?",
+                    (profile_id,),
+                )
+            for update in rebuilt.updates:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO policy_state_updates (
+                        id, profile_id, dimension_id, dimension_key, moment_id, session_id,
+                        timestamp, task_type, platform, decision_class, outcome_class,
+                        signal_type, delta, value_before, value_after, confidence_before,
+                        confidence_after, support_delta, reward_score, reason,
+                        source_moment_ids, evidence_refs, update_source, bias_candidate_key,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    self._policy_state_update_sql_values(update),
+                )
+            for dimension in rebuilt.dimensions:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO policy_state_dimensions (
+                        id, profile_id, dimension_key, value, confidence, support_count,
+                        avg_reward, recency_score, decay_rate, status, source_moment_ids,
+                        created_at, updated_at, last_triggered_at, trigger_count,
+                        rollback_parent_id, version, status_note
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    self._policy_state_dimension_sql_values(dimension),
+                )
+            return rebuilt
+
+        return self._execute_write(_do)
+
+    def rebuild_policy_state(
+        self,
+        *,
+        profile_id: str,
+        persist: bool = True,
+        clear_existing: bool = True,
+    ) -> PolicyStateRebuildResult:
+        return self.rebuild_policy_state_from_moments(
+            profile_id,
+            persist=persist,
+            clear_existing=clear_existing,
+        )
+
+    def reset_policy_state(
+        self,
+        *,
+        profile_id: str,
+        dimension_key: Optional[str] = None,
+        all_dimensions: bool = False,
+    ) -> dict[str, Any]:
+        def _do(conn: sqlite3.Connection) -> dict[str, Any]:
+            if all_dimensions or not dimension_key:
+                updates_cur = conn.execute(
+                    "DELETE FROM policy_state_updates WHERE profile_id = ?",
+                    (profile_id,),
+                )
+                dims_cur = conn.execute(
+                    "DELETE FROM policy_state_dimensions WHERE profile_id = ?",
+                    (profile_id,),
+                )
+                return {
+                    "profile_id": profile_id,
+                    "dimension_key": None,
+                    "all_dimensions": True,
+                    "deleted_dimensions": dims_cur.rowcount or 0,
+                    "deleted_updates": updates_cur.rowcount or 0,
+                }
+
+            updates_cur = conn.execute(
+                """
+                DELETE FROM policy_state_updates
+                WHERE profile_id = ? AND dimension_key = ?
+                """,
+                (profile_id, dimension_key),
+            )
+            dims_cur = conn.execute(
+                """
+                DELETE FROM policy_state_dimensions
+                WHERE profile_id = ? AND dimension_key = ?
+                """,
+                (profile_id, dimension_key),
+            )
+            return {
+                "profile_id": profile_id,
+                "dimension_key": dimension_key,
+                "all_dimensions": False,
+                "deleted_dimensions": dims_cur.rowcount or 0,
+                "deleted_updates": updates_cur.rowcount or 0,
+            }
+
+        return self._execute_write(_do)
+
+    def get_decision_trace(self, trace_id: str) -> Optional[DecisionTrace]:
+        row = self._conn.execute(
+            "SELECT * FROM decision_traces WHERE id = ?",
+            (trace_id,),
+        ).fetchone()
+        return self._trace_from_row(row) if row else None
+
+    def explain_policy_state_decision(
+        self,
+        *,
+        profile_id: str,
+        trace_id: Optional[str] = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        traces: list[DecisionTrace]
+        if trace_id:
+            trace = self.get_decision_trace(trace_id)
+            traces = [trace] if trace is not None and trace.profile_id == profile_id else []
+        else:
+            traces = self.get_recent_decision_traces(profile_id, limit=limit)
+
+        serialized: list[dict[str, Any]] = []
+        for trace in traces:
+            state_evidence = [
+                item
+                for item in trace.evidence_summary
+                if isinstance(item, dict) and item.get("kind") == "policy_state"
+            ]
+            if not state_evidence:
+                continue
+            serialized.append(
+                {
+                    "trace_id": trace.id,
+                    "session_id": trace.session_id,
+                    "turn_index": trace.turn_index,
+                    "task_type": trace.task_type,
+                    "platform": trace.platform,
+                    "planner_effects": list(trace.planner_effects),
+                    "tool_weight_deltas": list(trace.tool_weight_deltas),
+                    "risk_actions": list(trace.risk_actions),
+                    "response_effects": list(trace.response_effects),
+                    "active_dimensions": state_evidence,
+                    "created_at": trace.created_at,
+                }
+            )
+
+        if trace_id:
+            return serialized[0] if serialized else {}
+        return {
+            "profile_id": profile_id,
+            "traces": serialized[: max(1, int(limit))],
+        }
+
+    @staticmethod
+    def _policy_state_dimension_sql_values(
+        dimension: PolicyStateDimension,
+    ) -> tuple[Any, ...]:
+        return (
+            dimension.id,
+            dimension.profile_id,
+            dimension.dimension_key,
+            dimension.value,
+            dimension.confidence,
+            dimension.support_count,
+            dimension.avg_reward,
+            dimension.recency_score,
+            dimension.decay_rate,
+            dimension.status,
+            _json_dumps(dimension.source_moment_ids),
+            dimension.created_at,
+            dimension.updated_at,
+            dimension.last_triggered_at,
+            dimension.trigger_count,
+            dimension.rollback_parent_id,
+            dimension.version,
+            dimension.status_note,
+        )
+
+    @staticmethod
+    def _policy_state_dimension_update_sql() -> str:
+        return """
+            UPDATE policy_state_dimensions SET
+                profile_id = ?, dimension_key = ?, value = ?, confidence = ?,
+                support_count = ?, avg_reward = ?, recency_score = ?, decay_rate = ?,
+                status = ?, source_moment_ids = ?, updated_at = ?, last_triggered_at = ?,
+                trigger_count = ?, rollback_parent_id = ?, version = ?, status_note = ?
+            WHERE id = ?
+        """
+
+    @classmethod
+    def _policy_state_dimension_update_values(
+        cls,
+        dimension: PolicyStateDimension,
+    ) -> tuple[Any, ...]:
+        return (
+            dimension.profile_id,
+            dimension.dimension_key,
+            dimension.value,
+            dimension.confidence,
+            dimension.support_count,
+            dimension.avg_reward,
+            dimension.recency_score,
+            dimension.decay_rate,
+            dimension.status,
+            _json_dumps(dimension.source_moment_ids),
+            dimension.updated_at,
+            dimension.last_triggered_at,
+            dimension.trigger_count,
+            dimension.rollback_parent_id,
+            dimension.version,
+            dimension.status_note,
+            dimension.id,
+        )
+
+    @staticmethod
+    def _policy_state_update_sql_values(update: PolicyStateUpdate) -> tuple[Any, ...]:
+        return (
+            update.id,
+            update.profile_id,
+            update.dimension_id,
+            update.dimension_key,
+            update.moment_id,
+            update.session_id,
+            update.timestamp,
+            update.task_type,
+            update.platform,
+            update.decision_class,
+            update.outcome_class,
+            update.signal_type,
+            update.delta,
+            update.value_before,
+            update.value_after,
+            update.confidence_before,
+            update.confidence_after,
+            update.support_delta,
+            update.reward_score,
+            update.reason,
+            _json_dumps(update.source_moment_ids),
+            _json_dumps(update.evidence_refs),
+            update.update_source,
+            update.bias_candidate_key,
+            update.created_at,
+        )
+
+    @staticmethod
+    def _policy_state_dimension_from_row(row: sqlite3.Row) -> PolicyStateDimension:
+        return PolicyStateDimension(
+            id=row["id"],
+            profile_id=row["profile_id"],
+            dimension_key=row["dimension_key"],
+            value=float(row["value"]),
+            confidence=float(row["confidence"]),
+            support_count=int(row["support_count"]),
+            avg_reward=float(row["avg_reward"]),
+            recency_score=float(row["recency_score"]),
+            decay_rate=float(row["decay_rate"]),
+            status=row["status"],
+            source_moment_ids=_json_loads(row["source_moment_ids"], default=[]),
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+            last_triggered_at=row["last_triggered_at"],
+            trigger_count=int(row["trigger_count"]),
+            rollback_parent_id=row["rollback_parent_id"],
+            version=int(row["version"]),
+            status_note=row["status_note"] if "status_note" in row.keys() else None,
+        )
+
+    @staticmethod
+    def _policy_state_update_from_row(row: sqlite3.Row) -> PolicyStateUpdate:
+        return PolicyStateUpdate(
+            id=row["id"],
+            profile_id=row["profile_id"],
+            dimension_id=row["dimension_id"],
+            dimension_key=row["dimension_key"],
+            moment_id=row["moment_id"],
+            session_id=row["session_id"],
+            timestamp=float(row["timestamp"]),
+            task_type=row["task_type"],
+            platform=row["platform"],
+            decision_class=row["decision_class"],
+            outcome_class=row["outcome_class"],
+            signal_type=row["signal_type"],
+            delta=float(row["delta"]),
+            value_before=float(row["value_before"]),
+            value_after=float(row["value_after"]),
+            confidence_before=float(row["confidence_before"]),
+            confidence_after=float(row["confidence_after"]),
+            support_delta=int(row["support_delta"]),
+            reward_score=float(row["reward_score"]),
+            reason=row["reason"],
+            source_moment_ids=_json_loads(row["source_moment_ids"], default=[]),
+            evidence_refs=_json_loads(row["evidence_refs"], default=[]),
+            update_source=row["update_source"],
+            bias_candidate_key=row["bias_candidate_key"],
+            created_at=float(row["created_at"]),
+        )
 
     @staticmethod
     def _bias_sql_values(bias: PolicyBias) -> tuple[Any, ...]:

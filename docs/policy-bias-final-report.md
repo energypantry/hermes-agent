@@ -14,6 +14,8 @@ Implemented a first-class Policy Bias Engine with:
 - explainability traces
 - governance controls for enable, disable, archive, history, rollback, rebuild, and export
 - boundary metadata and audit tooling to keep policy bias separate from memory and skills
+- a V2 policy-state foundation with persistent dimensions, update history, and runtime consumption
+- a `policy-bias state ...` CLI subtree backed by the policy-state store for inspection, rebuild, reset, and explain flows
 
 The engine is integrated into the live Hermes conversation loop in `run_agent.py`, not just a standalone prototype module.
 
@@ -37,8 +39,11 @@ The engine is integrated into the live Hermes conversation loop in `run_agent.py
 - `docs/policy-bias.md`
 - `docs/policy-bias-ops.md`
 - `docs/policy-bias-data-model.md`
+- `docs/policy-bias-v2-foundation-plan.md`
+- `docs/policy-bias-v2-prd-prompt.md`
 - `tests/agent/test_policy_bias_engine.py`
 - `tests/hermes_cli/test_policy_bias_cmd.py`
+- `tests/hermes_cli/test_policy_state_cmd.py`
 - `tests/test_run_agent_policy_bias.py`
 
 ## Files Modified
@@ -47,6 +52,10 @@ The engine is integrated into the live Hermes conversation loop in `run_agent.py
 - `hermes_cli/config.py`
 - `hermes_cli/main.py`
 - `tests/tools/test_browser_camofox_state.py`
+- `hermes_cli/policy_bias_cmd.py`
+- `docs/policy-bias.md`
+- `docs/policy-bias-ops.md`
+- `docs/policy-bias-final-report.md`
 
 ## Migration Notes
 

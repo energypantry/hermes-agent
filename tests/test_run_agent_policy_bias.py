@@ -152,6 +152,44 @@ def test_one_step_bias_forces_sequential_tool_batches():
     assert agent._policy_requires_sequential_tool_batch(tool_calls) is True
 
 
+def test_policy_state_forces_sequential_tool_batches():
+    with (
+        patch(
+            "run_agent.get_tool_definitions",
+            return_value=_make_tool_defs("patch", "read_file", "todo"),
+        ),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    context = BiasDecisionContext(
+        session_id="session-1",
+        turn_index=1,
+        task_type="repo_modification",
+        platform="cli",
+        user_message="Fix the repo file one step at a time",
+        metadata={
+            "_policy_state_dimensions": [
+                SimpleNamespace(dimension_key="single_step_tendency", value=0.8),
+            ]
+        },
+    )
+    agent._policy_turn_context = context
+
+    tool_calls = [
+        SimpleNamespace(function=SimpleNamespace(name="todo")),
+        SimpleNamespace(function=SimpleNamespace(name="patch")),
+    ]
+
+    assert agent._policy_requires_sequential_tool_batch(tool_calls) is True
+
+
 def test_policy_response_controls_strip_fluff_and_add_findings_heading():
     with (
         patch(

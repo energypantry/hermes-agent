@@ -23,6 +23,21 @@ BIAS_SCOPES = (
 
 BIAS_STATUSES = ("active", "shadow", "disabled", "archived")
 
+POLICY_STATE_KEYS = (
+    "inspect_tendency",
+    "risk_aversion",
+    "local_first_tendency",
+    "decomposition_tendency",
+    "retry_switch_tendency",
+    "directness_tendency",
+    "verbosity_budget",
+    "findings_first_tendency",
+    "single_step_tendency",
+    "shared_channel_caution",
+)
+
+POLICY_STATE_STATUSES = ("active", "shadow", "disabled", "archived")
+
 
 def now_ts() -> float:
     return time.time()
@@ -158,6 +173,66 @@ class PolicyBias:
     version: int
     bias_candidate_key: Optional[str] = None
     status_note: Optional[str] = None
+
+
+@dataclass(slots=True)
+class PolicyStateDimension:
+    id: str
+    profile_id: str
+    dimension_key: str
+    value: float
+    confidence: float
+    support_count: int
+    avg_reward: float
+    recency_score: float
+    decay_rate: float
+    status: str
+    source_moment_ids: list[str]
+    created_at: float
+    updated_at: float
+    last_triggered_at: Optional[float]
+    trigger_count: int
+    rollback_parent_id: Optional[str]
+    version: int
+    status_note: Optional[str] = None
+
+
+@dataclass(slots=True)
+class PolicyStateUpdate:
+    id: str
+    profile_id: str
+    dimension_id: Optional[str]
+    dimension_key: str
+    moment_id: Optional[str]
+    session_id: Optional[str]
+    timestamp: float
+    task_type: str
+    platform: str
+    decision_class: str
+    outcome_class: str
+    signal_type: str
+    delta: float
+    value_before: float
+    value_after: float
+    confidence_before: float
+    confidence_after: float
+    support_delta: int
+    reward_score: float
+    reason: str
+    source_moment_ids: list[str]
+    evidence_refs: list[str]
+    update_source: str
+    bias_candidate_key: Optional[str] = None
+    created_at: float = field(default_factory=now_ts)
+
+
+@dataclass(slots=True)
+class PolicyStateRebuildResult:
+    profile_id: str
+    moment_count: int
+    dimensions: list[PolicyStateDimension] = field(default_factory=list)
+    updates: list[PolicyStateUpdate] = field(default_factory=list)
+    created_at: float = field(default_factory=now_ts)
 
 
 @dataclass(slots=True)

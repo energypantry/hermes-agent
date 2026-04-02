@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 BASE_SCHEMA_VERSION = 1
 
@@ -129,5 +129,82 @@ MIGRATIONS: dict[int, list[str]] = {
     ],
     4: [
         "ALTER TABLE decision_traces ADD COLUMN response_effects TEXT NOT NULL DEFAULT '[]'",
+    ],
+    5: [
+        """
+        CREATE TABLE IF NOT EXISTS policy_state_dimensions (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            dimension_key TEXT NOT NULL,
+            value REAL NOT NULL,
+            confidence REAL NOT NULL,
+            support_count INTEGER NOT NULL DEFAULT 0,
+            avg_reward REAL NOT NULL DEFAULT 0,
+            recency_score REAL NOT NULL DEFAULT 0,
+            decay_rate REAL NOT NULL DEFAULT 0.01,
+            status TEXT NOT NULL,
+            source_moment_ids TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            last_triggered_at REAL,
+            trigger_count INTEGER NOT NULL DEFAULT 0,
+            rollback_parent_id TEXT,
+            version INTEGER NOT NULL DEFAULT 1,
+            status_note TEXT
+        )
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_policy_state_dimensions_profile_key
+            ON policy_state_dimensions(profile_id, dimension_key)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_state_dimensions_profile_status
+            ON policy_state_dimensions(profile_id, status, updated_at DESC)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_state_dimensions_profile_updated
+            ON policy_state_dimensions(profile_id, updated_at DESC)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS policy_state_updates (
+            id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL,
+            dimension_id TEXT,
+            dimension_key TEXT NOT NULL,
+            moment_id TEXT,
+            session_id TEXT,
+            timestamp REAL NOT NULL,
+            task_type TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            decision_class TEXT NOT NULL,
+            outcome_class TEXT NOT NULL,
+            signal_type TEXT NOT NULL,
+            delta REAL NOT NULL,
+            value_before REAL NOT NULL,
+            value_after REAL NOT NULL,
+            confidence_before REAL NOT NULL,
+            confidence_after REAL NOT NULL,
+            support_delta INTEGER NOT NULL DEFAULT 1,
+            reward_score REAL NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL,
+            source_moment_ids TEXT NOT NULL,
+            evidence_refs TEXT NOT NULL,
+            update_source TEXT NOT NULL DEFAULT 'moment',
+            bias_candidate_key TEXT,
+            created_at REAL NOT NULL
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_state_updates_profile_dimension_time
+            ON policy_state_updates(profile_id, dimension_key, timestamp DESC)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_state_updates_profile_created
+            ON policy_state_updates(profile_id, created_at DESC)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_policy_state_updates_moment
+            ON policy_state_updates(moment_id, timestamp DESC)
+        """,
     ],
 }

@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from agent.model_metadata import estimate_tokens_rough
 
-from .models import PolicyBias
+from .models import PolicyBias, PolicyStateDimension
+from .state_runtime import prompt_hint_lines
 
 
 def build_decision_priors(
     biases: list[PolicyBias],
     *,
     max_prompt_tokens: int,
+    policy_state: list[PolicyStateDimension] | None = None,
 ) -> tuple[str, list[str]]:
-    if not biases:
+    if not biases and not policy_state:
         return "", []
 
     lines = ["Decision Priors"]
@@ -40,6 +42,13 @@ def build_decision_priors(
             line = truncated_line
         lines.append(line)
         injected_ids.append(bias.id)
+
+    state_lines = prompt_hint_lines(policy_state)
+    for line in state_lines:
+        candidate = "\n".join(lines + [line])
+        if estimate_tokens_rough(candidate) > max_prompt_tokens:
+            break
+        lines.append(line)
 
     if len(lines) == 1:
         return "", []
