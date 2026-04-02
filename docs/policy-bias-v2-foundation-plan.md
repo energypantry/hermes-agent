@@ -101,6 +101,26 @@ The compiler should resolve conflicts deterministically. When dimensions disagre
 - side-effect risk
 - profile-specific overrides
 
+### 2.6 V2.1 Runtime Compiler Upgrade
+
+The next concrete upgrade after the initial V2 substrate is to move from
+"effective values + a few hooks" to a more unified per-turn compiler output.
+
+The compiler should now emit:
+
+- `planner_mode`
+- `clarify_priority`
+- `tool_class_weights`
+- `response budget controls`
+- `conflict_resolutions`
+
+Examples:
+
+- ambiguous + high-risk + shared-channel context should produce `planner_mode=clarify_first`
+- directness should not suppress risk confirmation thresholds
+- findings-first and one-step-at-a-time can co-exist by preserving findings structure while capping numbered next steps to one
+- local-first and inspect-first should strengthen local inspection weights without depending on prompt text
+
 ## Proposed Architecture
 
 ### 1. Moment Layer

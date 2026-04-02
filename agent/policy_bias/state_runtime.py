@@ -9,6 +9,18 @@ from .models import PolicyStateDimension, PolicyStatePlan, now_ts
 
 _ACTIVE_STATUSES = {"active", "shadow"}
 _MIN_ACTIVE_MAGNITUDE = 0.12
+_AMBIGUITY_MARKERS = (
+    "maybe",
+    "probably",
+    "not sure",
+    "if needed",
+    "should we",
+    "can you",
+    "maybe send",
+    "不确定",
+    "如果需要",
+    "要不要",
+)
 _DEBUG_MARKERS = (
     "debug",
     "review",
@@ -51,6 +63,33 @@ def _is_debug_request(*, user_message: str, task_type: str) -> bool:
 def _looks_shared_platform(platform: str) -> bool:
     platform = (platform or "").lower()
     return any(token in platform for token in ("slack", "discord", "teams", "group", "channel"))
+
+
+def looks_ambiguous_request(user_message: str) -> bool:
+    text = (user_message or "").lower()
+    return any(token in text for token in _AMBIGUITY_MARKERS)
+
+
+def _record_conflict(
+    conflicts: list[dict[str, object]],
+    *,
+    between: tuple[str, str],
+    winner: str,
+    loser: str,
+    rationale: str,
+) -> None:
+    conflicts.append(
+        {
+            "between": list(between),
+            "winner": winner,
+            "loser": loser,
+            "rationale": rationale,
+        }
+    )
+
+
+def _rounded_weights(weights: dict[str, float]) -> dict[str, float]:
+    return {key: round(float(value), 3) for key, value in weights.items() if abs(float(value)) > 1e-6}
 
 
 def active_dimensions(
@@ -165,7 +204,9 @@ def compile_state_plan(
     values = effective_value_map(active)
     available = set(available_tools or [])
     recent_failed = set(recent_failed_tools or [])
+    ambiguous = looks_ambiguous_request(user_message)
     notes: list[str] = []
+    conflicts: list[dict[str, object]] = []
 
     inspect = values.get("inspect_tendency", 0.0)
     risk = values.get("risk_aversion", 0.0)
@@ -185,6 +226,45 @@ def compile_state_plan(
     response_directness = _clamp01(max(directness, verbosity_budget * 0.85))
     findings_first_priority = _clamp01(findings_first if _is_debug_request(user_message=user_message, task_type=task_type) else 0.0)
     single_step_priority = _clamp01(single_step)
+    clarify_priority = 0.0
+    if "clarify" in available:
+        clarify_priority = _clamp01(
+            (0.72 if ambiguous else 0.0)
+            * max(execution_caution, shared_caution, single_step_priority * 0.85, decompose * 0.75)
+            + (0.20 if recent_failed and retry_avoidance >= 0.35 else 0.0)
+        )
+        if ambiguous and execution_caution >= 0.45:
+            clarify_priority = max(clarify_priority, 0.48)
+
+    if execution_caution >= 0.55 and response_directness >= 0.45:
+        _record_conflict(
+            conflicts,
+            between=("risk_aversion", "directness_tendency"),
+            winner="risk_aversion",
+            loser="directness_tendency",
+            rationale="High side-effect caution overrides terse execution behavior for risky decisions.",
+        )
+        notes.append("Risk caution overrides directness when side effects are on the line.")
+
+    if single_step_priority >= 0.35 and decompose >= 0.45:
+        _record_conflict(
+            conflicts,
+            between=("single_step_tendency", "decomposition_tendency"),
+            winner="single_step_tendency",
+            loser="decomposition_tendency",
+            rationale="Decomposition remains preferred, but execution is serialized into one next step at a time.",
+        )
+        notes.append("Single-step tendency serializes decomposition into one next action at a time.")
+
+    if findings_first_priority >= 0.35 and single_step_priority >= 0.35:
+        _record_conflict(
+            conflicts,
+            between=("findings_first_tendency", "single_step_tendency"),
+            winner="findings_first_tendency",
+            loser="single_step_tendency",
+            rationale="Findings-first structure is preserved, but the numbered next-step budget is capped to one.",
+        )
+        notes.append("Findings-first structure is preserved while the next-step budget is capped at one.")
 
     if execution_caution >= 0.72:
         preferred_risk_mode = "confirm"
@@ -195,8 +275,31 @@ def compile_state_plan(
     else:
         preferred_risk_mode = "direct"
 
+    planner_mode = "direct"
+    if clarify_priority >= 0.45:
+        planner_mode = "clarify_first"
+        notes.append("Clarify-first arbitration activates under ambiguity and elevated caution.")
+    elif planning_priority >= 0.70 and decompose >= inspect and {"todo", "clarify"} & available:
+        planner_mode = "decompose_first"
+        notes.append("Decompose-first arbitration prioritizes planning surfaces before execution.")
+    elif planning_priority >= 0.55 and inspect >= 0.45 and {
+        "read_file",
+        "search_files",
+        "browser_snapshot",
+        "web_search",
+        "web_extract",
+    } & available:
+        planner_mode = "inspect_first"
+        notes.append("Inspect-first arbitration prioritizes cheap verification before mutation.")
+    elif local_first_priority >= 0.70 and {"read_file", "search_files", "patch", "write_file", "terminal"} & available:
+        planner_mode = "local_first"
+        notes.append("Local-first arbitration biases toward local repo surfaces before external browsing.")
+
     require_sequential = False
-    if single_step_priority >= 0.35:
+    if planner_mode == "clarify_first":
+        require_sequential = True
+        notes.append("Clarify-first arbitration serializes execution until ambiguity is reduced.")
+    elif single_step_priority >= 0.35:
         require_sequential = True
         notes.append("Single-step tendency forces sequential tool execution.")
     elif planning_priority >= 0.55 and {"todo", "clarify"} & available and recent_failed:
@@ -216,6 +319,41 @@ def compile_state_plan(
         notes.append("Findings-first tendency restructures debug/review responses.")
     if single_step_priority >= 0.35:
         response_controls["prefer_single_step"] = True
+        response_controls["max_numbered_steps"] = 1
+
+    tool_class_weights = _rounded_weights(
+        {
+            "inspect": _clamp01(
+                (0.85 * planning_priority)
+                + (0.35 * execution_caution)
+                + (0.15 if planner_mode == "inspect_first" else 0.0)
+            ),
+            "planning": _clamp01(
+                (0.75 * planning_priority)
+                + (0.35 * single_step_priority)
+                + (0.20 if planner_mode in {"decompose_first", "clarify_first"} else 0.0)
+            ),
+            "clarify": _clamp01(
+                clarify_priority + (0.15 if planner_mode == "clarify_first" else 0.0)
+            ),
+            "local": _clamp01(
+                (0.90 * local_first_priority) + (0.10 * planning_priority)
+            ) if task_type == "repo_modification" else 0.0,
+            "mutating": -_clamp01(
+                (0.30 * planning_priority)
+                + (0.45 * execution_caution)
+                + (0.20 * single_step_priority)
+                + (0.15 if planner_mode == "clarify_first" else 0.0)
+            ),
+            "external": -_clamp01(
+                (0.25 * execution_caution)
+                + (0.35 * local_first_priority)
+                + (0.30 * shared_caution)
+                + (0.15 if planner_mode == "clarify_first" else 0.0)
+            ),
+            "retry_failed": -_clamp01(0.95 * retry_avoidance),
+        }
+    )
 
     prompt_hint_keys: list[str] = []
     if execution_caution >= 0.72:
@@ -244,6 +382,8 @@ def compile_state_plan(
         execution_caution=execution_caution,
         local_first_priority=local_first_priority,
         retry_avoidance=retry_avoidance,
+        planner_mode=planner_mode,
+        clarify_priority=clarify_priority,
         response_directness=response_directness,
         findings_first_priority=findings_first_priority,
         single_step_priority=single_step_priority,
@@ -251,8 +391,11 @@ def compile_state_plan(
         require_sequential=require_sequential,
         preferred_risk_mode=preferred_risk_mode,
         prompt_mode=prompt_mode,
+        available_tools=sorted(available),
         prompt_hint_keys=prompt_hint_keys,
+        tool_class_weights=tool_class_weights,
         response_controls=response_controls,
+        conflict_resolutions=conflicts,
         arbitration_notes=notes,
     )
 
@@ -264,6 +407,8 @@ def plan_summary(plan: PolicyStatePlan) -> dict[str, object]:
         "execution_caution": round(plan.execution_caution, 3),
         "local_first_priority": round(plan.local_first_priority, 3),
         "retry_avoidance": round(plan.retry_avoidance, 3),
+        "planner_mode": plan.planner_mode,
+        "clarify_priority": round(plan.clarify_priority, 3),
         "response_directness": round(plan.response_directness, 3),
         "findings_first_priority": round(plan.findings_first_priority, 3),
         "single_step_priority": round(plan.single_step_priority, 3),
@@ -271,7 +416,9 @@ def plan_summary(plan: PolicyStatePlan) -> dict[str, object]:
         "require_sequential": bool(plan.require_sequential),
         "preferred_risk_mode": plan.preferred_risk_mode,
         "prompt_mode": plan.prompt_mode,
+        "tool_class_weights": dict(plan.tool_class_weights),
         "prompt_hint_keys": list(plan.prompt_hint_keys),
+        "conflict_resolutions": list(plan.conflict_resolutions),
         "arbitration_notes": list(plan.arbitration_notes),
     }
 

@@ -243,6 +243,8 @@ class PolicyStatePlan:
     execution_caution: float = 0.0
     local_first_priority: float = 0.0
     retry_avoidance: float = 0.0
+    planner_mode: str = "direct"
+    clarify_priority: float = 0.0
     response_directness: float = 0.0
     findings_first_priority: float = 0.0
     single_step_priority: float = 0.0
@@ -250,8 +252,11 @@ class PolicyStatePlan:
     require_sequential: bool = False
     preferred_risk_mode: str = "direct"
     prompt_mode: str = "minimal"
+    available_tools: list[str] = field(default_factory=list)
     prompt_hint_keys: list[str] = field(default_factory=list)
+    tool_class_weights: dict[str, float] = field(default_factory=dict)
     response_controls: dict[str, Any] = field(default_factory=dict)
+    conflict_resolutions: list[dict[str, Any]] = field(default_factory=list)
     arbitration_notes: list[str] = field(default_factory=list)
 
 

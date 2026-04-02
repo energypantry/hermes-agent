@@ -146,6 +146,13 @@ def apply_response_controls(
             content = f"**Findings**\n{content}"
             effects.append({"effect": "prepend_findings_heading"})
 
+    max_numbered_steps = int(controls.get("max_numbered_steps") or 0)
+    if max_numbered_steps > 0 and content:
+        trimmed, changed = _limit_numbered_steps(content, max_numbered_steps)
+        if changed:
+            content = trimmed
+            effects.append({"effect": "limit_numbered_steps", "limit": max_numbered_steps})
+
     if controls.get("prefer_single_step") and content:
         trimmed, changed = _trim_to_single_step(content)
         if changed:
@@ -177,14 +184,20 @@ def _looks_like_trailing_offer(line: str) -> bool:
 
 
 def _trim_to_single_step(content: str) -> tuple[str, bool]:
+    return _limit_numbered_steps(content, 1)
+
+
+def _limit_numbered_steps(content: str, limit: int) -> tuple[str, bool]:
+    if limit <= 0:
+        return content, False
     lines = content.splitlines()
     step_indexes = [
         index
         for index, line in enumerate(lines)
         if _NUMBERED_STEP_RE.match(line.strip())
     ]
-    if len(step_indexes) < 2:
+    if len(step_indexes) <= limit:
         return content, False
-    cutoff = step_indexes[1]
+    cutoff = step_indexes[limit]
     trimmed = "\n".join(lines[:cutoff]).strip()
     return trimmed or content, bool(trimmed and trimmed != content)

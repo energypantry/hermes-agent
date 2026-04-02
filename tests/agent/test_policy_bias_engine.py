@@ -19,6 +19,7 @@ from agent.policy_bias.models import (
 )
 from agent.policy_bias.planner_hooks import evaluate_risk_gate, rerank_tools
 from agent.policy_bias.retrieval import retrieve_biases
+from agent.policy_bias.response_hooks import apply_response_controls
 from agent.policy_bias.state_runtime import compile_state_plan, plan_summary
 from agent.policy_bias.store import PolicyBiasStore
 from agent.policy_bias.synthesis import (
@@ -549,14 +550,50 @@ def test_policy_state_plan_compiles_arbitration_and_minimal_prompt_hints():
     )
 
     assert injected_ids == []
+    assert plan.planner_mode == "inspect_first"
     assert plan.require_sequential is True
     assert plan.preferred_risk_mode == "confirm"
     assert plan.prompt_mode == "minimal"
+    assert plan.tool_class_weights["inspect"] > 0.8
     assert len(plan.prompt_hint_keys) <= 3
     assert "risk_aversion" in plan.prompt_hint_keys
     assert priors.startswith("Decision Priors")
     assert "state=risk_aversion" in priors
     assert "state=local_first_tendency" in priors
+
+
+def test_policy_state_plan_arbitrates_clarify_first_and_conflicts():
+    policy_state = [
+        _make_state_dimension("profile:test", "risk_aversion", value=0.94, confidence=0.91),
+        _make_state_dimension("profile:test", "directness_tendency", value=0.82, confidence=0.88),
+        _make_state_dimension("profile:test", "findings_first_tendency", value=0.86, confidence=0.83),
+        _make_state_dimension("profile:test", "single_step_tendency", value=0.79, confidence=0.84),
+        _make_state_dimension("profile:test", "shared_channel_caution", value=0.81, confidence=0.90),
+    ]
+
+    plan = compile_state_plan(
+        policy_state,
+        task_type="repo_modification",
+        platform="slack",
+        user_message="Review this regression and maybe send the update to the team?",
+        available_tools=["clarify", "send_message", "todo", "read_file"],
+        recent_failed_tools=[],
+    )
+
+    assert plan.planner_mode == "clarify_first"
+    assert plan.clarify_priority >= 0.45
+    assert plan.require_sequential is True
+    assert plan.tool_class_weights["clarify"] > 0.55
+    assert plan.response_controls["findings_first_heading"] is True
+    assert plan.response_controls["max_numbered_steps"] == 1
+    assert any(
+        conflict["winner"] == "risk_aversion" and conflict["loser"] == "directness_tendency"
+        for conflict in plan.conflict_resolutions
+    )
+    assert any(
+        conflict["winner"] == "findings_first_tendency"
+        for conflict in plan.conflict_resolutions
+    )
 
 
 def test_policy_state_plan_summary_is_emitted_for_explainability():
@@ -572,6 +609,8 @@ def test_policy_state_plan_summary_is_emitted_for_explainability():
 
     assert summary["kind"] == "policy_state_plan"
     assert summary["findings_first_priority"] > 0
+    assert "planner_mode" in summary
+    assert "tool_class_weights" in summary
     assert isinstance(summary["arbitration_notes"], list)
 
 
@@ -681,6 +720,88 @@ def test_policy_state_reranking_and_risk_gate_apply_without_bias_objects():
     assert blocked.decision == "confirm"
     assert simulated is not None
     assert simulated.decision == "simulate"
+
+
+def test_policy_state_plan_prefers_clarify_under_ambiguity():
+    policy_state = [
+        _make_state_dimension("profile:test", "risk_aversion", value=0.88),
+        _make_state_dimension("profile:test", "single_step_tendency", value=0.72),
+        _make_state_dimension("profile:test", "shared_channel_caution", value=0.76),
+    ]
+    plan = compile_state_plan(
+        policy_state,
+        task_type="repo_modification",
+        platform="slack",
+        user_message="Maybe send this update to the team if needed?",
+        available_tools=["clarify", "send_message", "todo", "read_file"],
+        recent_failed_tools=[],
+    )
+
+    ranked_tools, _deltas, _planner_effects = rerank_tools(
+        _tool_defs("send_message", "clarify", "read_file"),
+        [],
+        user_message="Maybe send this update to the team if needed?",
+        task_type="repo_modification",
+        platform="slack",
+        recent_failed_tools=[],
+        policy_state=policy_state,
+        policy_state_plan=plan,
+    )
+    blocked = evaluate_risk_gate(
+        "send_message",
+        {"message": "hello"},
+        [],
+        require_inspect_first=True,
+        has_recent_inspection=False,
+        user_message="Maybe send this update to the team if needed?",
+        platform="slack",
+        policy_state=policy_state,
+        policy_state_plan=plan,
+    )
+
+    assert [tool["function"]["name"] for tool in ranked_tools][:2] == ["clarify", "read_file"]
+    assert blocked is not None
+    assert blocked.decision == "confirm"
+    assert blocked.suggested_tool == "clarify"
+
+
+def test_policy_state_response_budget_limits_numbered_steps():
+    text = (
+        "Got it.\n\n"
+        "**Findings**\n"
+        "1. Inspect the failing state transition.\n"
+        "2. Patch the guard clause.\n"
+        "3. Re-run the test."
+    )
+    content, effects = apply_response_controls(
+        text,
+        {
+            "strip_leading_acknowledgement": True,
+            "findings_first_heading": True,
+            "max_numbered_steps": 1,
+        },
+    )
+
+    assert content == "**Findings**\n1. Inspect the failing state transition."
+    assert any(effect["effect"] == "limit_numbered_steps" for effect in effects)
+
+
+def test_policy_state_local_weight_stays_off_for_non_repo_tasks():
+    policy_state = [
+        _make_state_dimension("profile:test", "local_first_tendency", value=0.95),
+        _make_state_dimension("profile:test", "inspect_tendency", value=0.82),
+    ]
+
+    plan = compile_state_plan(
+        policy_state,
+        task_type="current_info",
+        platform="cli",
+        user_message="What changed in today's release?",
+        available_tools=["read_file", "web_search", "web_extract"],
+        recent_failed_tools=[],
+    )
+
+    assert "local" not in plan.tool_class_weights
 
 
 def test_repeated_success_promotes_active_bias_and_influences_next_turn(tmp_path):

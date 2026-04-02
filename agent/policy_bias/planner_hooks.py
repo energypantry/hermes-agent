@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import copy
-from types import SimpleNamespace
 from typing import Iterable
 
 from .models import PolicyBias, PolicyStateDimension, PolicyStatePlan, RiskAction, ToolWeightDelta
 from .scoring import side_effect_level_for_tool
-from .state_runtime import dimension_map
+from .state_runtime import dimension_map, looks_ambiguous_request
 
 _INSPECT_TOOLS = {"read_file", "search_files", "browser_snapshot", "web_search", "web_extract", "ha_get_state", "ha_list_entities", "ha_list_services"}
 _LOCAL_TOOLS = {"read_file", "search_files", "patch", "write_file", "terminal"}
@@ -49,25 +48,6 @@ def _has_explicit_execute_intent(user_message: str, function_args: dict[str, obj
     )
 
 
-def _is_high_ambiguity_request(user_message: str) -> bool:
-    text = (user_message or "").lower()
-    return any(
-        token in text
-        for token in (
-            "maybe",
-            "probably",
-            "not sure",
-            "if needed",
-            "should we",
-            "can you",
-            "maybe send",
-            "不确定",
-            "如果需要",
-            "要不要",
-        )
-    )
-
-
 def _candidate_keys(biases: Iterable[PolicyBias]) -> set[str]:
     return {bias.bias_candidate_key or "" for bias in biases}
 
@@ -96,6 +76,8 @@ def rerank_tools(
     deltas: list[ToolWeightDelta] = []
     planner_effects: list[dict] = []
     scored: list[tuple[float, int, dict]] = []
+    plan_weights = dict(policy_state_plan.tool_class_weights) if policy_state_plan is not None else {}
+    planner_mode = policy_state_plan.planner_mode if policy_state_plan is not None else "direct"
 
     for index, tool_def in enumerate(tool_defs):
         tool_name = tool_def.get("function", {}).get("name", "")
@@ -175,55 +157,107 @@ def rerank_tools(
             delta -= 1.0
             reasons.append("recent-failing-path")
 
-        inspect_tendency = max(0.0, float(state_values.get("inspect_tendency", 0.0)))
-        if inspect_tendency:
-            if tool_name in _INSPECT_TOOLS:
-                delta += 0.85 * inspect_tendency
-                reasons.append("policy-state:inspect-tendency")
-            elif tool_name in _MUTATING_TOOLS:
-                delta -= 0.20 * inspect_tendency
-                reasons.append("policy-state:defer-mutation")
+        if policy_state_plan is not None and plan_weights:
+            inspect_weight = max(0.0, float(plan_weights.get("inspect", 0.0)))
+            if inspect_weight:
+                if tool_name in _INSPECT_TOOLS:
+                    delta += 0.95 * inspect_weight
+                    reasons.append("policy-plan:inspect")
+                elif tool_name in _MUTATING_TOOLS:
+                    delta -= 0.22 * inspect_weight
+                    reasons.append("policy-plan:defer-mutation")
 
-        risk_aversion = max(0.0, float(state_values.get("risk_aversion", 0.0)))
-        if risk_aversion:
-            if tool_name in _INSPECT_TOOLS:
-                delta += 0.55 * risk_aversion
-                reasons.append("policy-state:risk-aversion")
-            elif tool_name in _MUTATING_TOOLS | _EXTERNAL_TOOLS:
-                delta -= 0.35 * risk_aversion
-                reasons.append("policy-state:risk-penalty")
+            planning_weight = max(0.0, float(plan_weights.get("planning", 0.0)))
+            if planning_weight:
+                if tool_name in _PLANNING_TOOLS:
+                    delta += 0.95 * planning_weight
+                    reasons.append("policy-plan:planning")
+                elif tool_name in _MUTATING_TOOLS | _EXTERNAL_TOOLS:
+                    delta -= 0.18 * planning_weight
+                    reasons.append("policy-plan:delay-execution")
 
-        local_first = max(0.0, float(state_values.get("local_first_tendency", 0.0)))
-        if local_first and task_type == "repo_modification":
-            if tool_name in _LOCAL_TOOLS:
-                delta += 0.85 * local_first
-                reasons.append("policy-state:local-first")
-            elif tool_name in {"web_search", "web_extract", "browser_navigate"}:
-                delta -= 0.65 * local_first
-                reasons.append("policy-state:penalize-external")
+            clarify_weight = max(0.0, float(plan_weights.get("clarify", 0.0)))
+            if clarify_weight and tool_name == "clarify":
+                delta += 1.10 * clarify_weight
+                reasons.append("policy-plan:clarify")
 
-        decomposition = max(0.0, float(state_values.get("decomposition_tendency", 0.0)))
-        if decomposition:
-            if tool_name in _PLANNING_TOOLS:
-                delta += 0.90 * decomposition
-                reasons.append("policy-state:decompose")
-            elif tool_name in _MUTATING_TOOLS | _EXTERNAL_TOOLS:
-                delta -= 0.25 * decomposition
-                reasons.append("policy-state:delay-execution")
+            local_weight = max(0.0, float(plan_weights.get("local", 0.0)))
+            if local_weight and task_type == "repo_modification":
+                if tool_name in _LOCAL_TOOLS:
+                    delta += 0.90 * local_weight
+                    reasons.append("policy-plan:local-first")
+                elif tool_name in {"web_search", "web_extract", "browser_navigate"}:
+                    delta -= 0.70 * local_weight
+                    reasons.append("policy-plan:penalize-external")
 
-        retry_switch = max(0.0, float(state_values.get("retry_switch_tendency", 0.0)))
-        if retry_switch and tool_name in recent_failed:
-            delta -= 1.10 * retry_switch
-            reasons.append("policy-state:avoid-retry-loop")
+            mutating_weight = float(plan_weights.get("mutating", 0.0))
+            if mutating_weight < 0 and tool_name in _MUTATING_TOOLS:
+                delta += mutating_weight
+                reasons.append("policy-plan:mutating-penalty")
 
-        shared_channel_caution = max(0.0, float(state_values.get("shared_channel_caution", 0.0)))
-        if shared_channel_caution and _looks_shared_platform(platform):
-            if tool_name in _MUTATING_TOOLS | {"send_message", "cronjob", "ha_call_service"}:
-                delta -= 0.40 * shared_channel_caution
-                reasons.append("policy-state:shared-channel-caution")
-            elif tool_name in _INSPECT_TOOLS | _PLANNING_TOOLS:
-                delta += 0.25 * shared_channel_caution
-                reasons.append("policy-state:shared-channel-inspect")
+            external_weight = float(plan_weights.get("external", 0.0))
+            if external_weight < 0 and tool_name in _EXTERNAL_TOOLS:
+                delta += external_weight
+                reasons.append("policy-plan:external-penalty")
+
+            retry_failed_weight = float(plan_weights.get("retry_failed", 0.0))
+            if retry_failed_weight < 0 and tool_name in recent_failed:
+                delta += retry_failed_weight
+                reasons.append("policy-plan:avoid-retry-loop")
+
+            if planner_mode == "clarify_first" and tool_name in _MUTATING_TOOLS | _EXTERNAL_TOOLS:
+                delta -= 0.20
+                reasons.append("policy-plan:clarify-first")
+        else:
+            inspect_tendency = max(0.0, float(state_values.get("inspect_tendency", 0.0)))
+            if inspect_tendency:
+                if tool_name in _INSPECT_TOOLS:
+                    delta += 0.85 * inspect_tendency
+                    reasons.append("policy-state:inspect-tendency")
+                elif tool_name in _MUTATING_TOOLS:
+                    delta -= 0.20 * inspect_tendency
+                    reasons.append("policy-state:defer-mutation")
+
+            risk_aversion = max(0.0, float(state_values.get("risk_aversion", 0.0)))
+            if risk_aversion:
+                if tool_name in _INSPECT_TOOLS:
+                    delta += 0.55 * risk_aversion
+                    reasons.append("policy-state:risk-aversion")
+                elif tool_name in _MUTATING_TOOLS | _EXTERNAL_TOOLS:
+                    delta -= 0.35 * risk_aversion
+                    reasons.append("policy-state:risk-penalty")
+
+            local_first = max(0.0, float(state_values.get("local_first_tendency", 0.0)))
+            if local_first and task_type == "repo_modification":
+                if tool_name in _LOCAL_TOOLS:
+                    delta += 0.85 * local_first
+                    reasons.append("policy-state:local-first")
+                elif tool_name in {"web_search", "web_extract", "browser_navigate"}:
+                    delta -= 0.65 * local_first
+                    reasons.append("policy-state:penalize-external")
+
+            decomposition = max(0.0, float(state_values.get("decomposition_tendency", 0.0)))
+            if decomposition:
+                if tool_name in _PLANNING_TOOLS:
+                    delta += 0.90 * decomposition
+                    reasons.append("policy-state:decompose")
+                elif tool_name in _MUTATING_TOOLS | _EXTERNAL_TOOLS:
+                    delta -= 0.25 * decomposition
+                    reasons.append("policy-state:delay-execution")
+
+            retry_switch = max(0.0, float(state_values.get("retry_switch_tendency", 0.0)))
+            if retry_switch and tool_name in recent_failed:
+                delta -= 1.10 * retry_switch
+                reasons.append("policy-state:avoid-retry-loop")
+
+            shared_channel_caution = max(0.0, float(state_values.get("shared_channel_caution", 0.0)))
+            if shared_channel_caution and _looks_shared_platform(platform):
+                if tool_name in _MUTATING_TOOLS | {"send_message", "cronjob", "ha_call_service"}:
+                    delta -= 0.40 * shared_channel_caution
+                    reasons.append("policy-state:shared-channel-caution")
+                elif tool_name in _INSPECT_TOOLS | _PLANNING_TOOLS:
+                    delta += 0.25 * shared_channel_caution
+                    reasons.append("policy-state:shared-channel-inspect")
 
         if delta:
             deltas.append(ToolWeightDelta(tool_name=tool_name, weight_delta=delta, reasons=reasons))
@@ -256,6 +290,7 @@ def rerank_tool_calls(
         for key, dimension in state.items()
     }
     recent_failed = set(recent_failed_tools or [])
+    plan_weights = dict(policy_state_plan.tool_class_weights) if policy_state_plan is not None else {}
     if not keys and not state and policy_state_plan is None:
         return parsed_calls, []
 
@@ -279,21 +314,37 @@ def rerank_tool_calls(
                 score -= 6
         if "tool_use.change_strategy_after_retries" in keys and tool_name in recent_failed:
             score -= 25
-        inspect_tendency = max(0.0, float(state_values.get("inspect_tendency", 0.0)))
-        if inspect_tendency:
+        if policy_state_plan is not None and plan_weights:
             if tool_name in _INSPECT_TOOLS:
-                score += int(18 * inspect_tendency)
-            elif tool_name in _MUTATING_TOOLS:
-                score -= int(7 * inspect_tendency)
-        decomposition = max(0.0, float(state_values.get("decomposition_tendency", 0.0)))
-        if decomposition:
+                score += int(18 * max(0.0, float(plan_weights.get("inspect", 0.0))))
             if tool_name in _PLANNING_TOOLS:
-                score += int(16 * decomposition)
-            elif tool_name in _MUTATING_TOOLS | _EXTERNAL_TOOLS:
-                score -= int(6 * decomposition)
-        retry_switch = max(0.0, float(state_values.get("retry_switch_tendency", 0.0)))
-        if retry_switch and tool_name in recent_failed:
-            score -= int(18 * retry_switch)
+                score += int(16 * max(0.0, float(plan_weights.get("planning", 0.0))))
+            if tool_name == "clarify":
+                score += int(20 * max(0.0, float(plan_weights.get("clarify", 0.0))))
+            if tool_name in _LOCAL_TOOLS:
+                score += int(14 * max(0.0, float(plan_weights.get("local", 0.0))))
+            if tool_name in _MUTATING_TOOLS:
+                score += int(16 * float(plan_weights.get("mutating", 0.0)))
+            if tool_name in _EXTERNAL_TOOLS:
+                score += int(16 * float(plan_weights.get("external", 0.0)))
+            if tool_name in recent_failed:
+                score += int(18 * float(plan_weights.get("retry_failed", 0.0)))
+        else:
+            inspect_tendency = max(0.0, float(state_values.get("inspect_tendency", 0.0)))
+            if inspect_tendency:
+                if tool_name in _INSPECT_TOOLS:
+                    score += int(18 * inspect_tendency)
+                elif tool_name in _MUTATING_TOOLS:
+                    score -= int(7 * inspect_tendency)
+            decomposition = max(0.0, float(state_values.get("decomposition_tendency", 0.0)))
+            if decomposition:
+                if tool_name in _PLANNING_TOOLS:
+                    score += int(16 * decomposition)
+                elif tool_name in _MUTATING_TOOLS | _EXTERNAL_TOOLS:
+                    score -= int(6 * decomposition)
+            retry_switch = max(0.0, float(state_values.get("retry_switch_tendency", 0.0)))
+            if retry_switch and tool_name in recent_failed:
+                score -= int(18 * retry_switch)
         if policy_state_plan is not None and policy_state_plan.require_sequential:
             if tool_name in _PLANNING_TOOLS | _INSPECT_TOOLS:
                 score += 8
@@ -340,7 +391,7 @@ def evaluate_risk_gate(
         "platform_specific.group_chat_caution",
     }]
     explicit_intent = _has_explicit_execute_intent(user_message, function_args)
-    ambiguous = _is_high_ambiguity_request(user_message)
+    ambiguous = looks_ambiguous_request(user_message)
     state_values = dict(policy_state_plan.effective_values) if policy_state_plan is not None else {
         key: float(dimension.value)
         for key, dimension in state.items()
@@ -352,13 +403,16 @@ def evaluate_risk_gate(
     risk_aversion = max(0.0, float(state_values.get("risk_aversion", 0.0)))
     inspect_tendency = max(0.0, float(state_values.get("inspect_tendency", 0.0)))
     preferred_risk_mode = policy_state_plan.preferred_risk_mode if policy_state_plan is not None else "direct"
+    clarify_priority = policy_state_plan.clarify_priority if policy_state_plan is not None else 0.0
+    available_tools = set(policy_state_plan.available_tools) if policy_state_plan is not None else set()
+    clarify_tool = "clarify" if "clarify" in available_tools else None
 
     if shared_platform and tool_name in {"send_message", "cronjob", "ha_call_service"} and not explicit_intent:
         return RiskAction(
             tool_name=tool_name,
             decision="confirm",
             reason="Shared-channel caution bias requires explicit confirmation before taking an external side-effect action in a group or channel context.",
-            suggested_tool="web_search",
+            suggested_tool=clarify_tool or "web_search",
             bias_ids=bias_ids,
         )
 
@@ -378,7 +432,7 @@ def evaluate_risk_gate(
                 tool_name=tool_name,
                 decision="confirm",
                 reason="Policy bias requires stronger certainty before a high-side-effect external action can proceed, even after inspection.",
-                suggested_tool="web_search",
+                suggested_tool=clarify_tool or "web_search",
                 bias_ids=bias_ids,
             )
         return None
@@ -388,6 +442,8 @@ def evaluate_risk_gate(
         suggested_tool = "web_search"
     if tool_name == "terminal":
         suggested_tool = "search_files"
+    if ambiguous and clarify_tool and clarify_priority >= 0.45:
+        suggested_tool = clarify_tool
 
     decision = "inspect"
     reason = "Policy bias requires an inspect/search step before executing a mutating or external action."
@@ -398,7 +454,10 @@ def evaluate_risk_gate(
         ambiguous or not explicit_intent or risk_aversion >= 0.55 or preferred_risk_mode == "confirm"
     ):
         decision = "confirm"
-        reason = "Policy bias requires stronger certainty before executing this external side-effect action."
+        if clarify_tool and ambiguous and clarify_priority >= 0.45:
+            reason = "Policy bias requires clarifying intent before executing this external side-effect action."
+        else:
+            reason = "Policy bias requires stronger certainty before executing this external side-effect action."
     elif tool_name == "terminal":
         command = str(function_args.get("command", "") or "").lower()
         if any(token in command for token in ("rm ", "git reset", "git clean", "truncate ", "dd ")):

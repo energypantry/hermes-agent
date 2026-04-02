@@ -15,6 +15,7 @@ Implemented a first-class Policy Bias Engine with:
 - governance controls for enable, disable, archive, history, rollback, rebuild, and export
 - boundary metadata and audit tooling to keep policy bias separate from memory and skills
 - a V2 policy-state foundation with persistent dimensions, update history, compiler-oriented arbitration, and runtime consumption
+- a V2.1 compiler surface with explicit `planner_mode`, `clarify_priority`, `tool_class_weights`, response budgets, and conflict-resolution metadata
 - a `policy-bias state ...` CLI subtree backed by the policy-state store for inspection, rebuild, reset, and explain flows
 
 The engine is integrated into the live Hermes conversation loop in `run_agent.py`, not just a standalone prototype module.
