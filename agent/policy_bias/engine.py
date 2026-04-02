@@ -234,6 +234,8 @@ class PolicyBiasEngine:
             context.active_biases,
             require_inspect_first=self.config.require_inspect_before_execute_for_external_actions,
             has_recent_inspection=bool(context.metadata.get("has_recent_inspection")),
+            user_message=context.user_message,
+            platform=context.platform,
         )
         if risk_action is not None:
             context.metadata.setdefault("risk_actions", []).append(
@@ -261,15 +263,21 @@ class PolicyBiasEngine:
         if context is None or not self.is_enabled():
             return
 
-        failure = self._tool_result_failed(result)
-        outcome_class = "failure" if failure else "success"
-        error_signal = 1.0 if failure else 0.0
+        result_status = self._tool_result_status(result)
+        is_guard_block = result_status in {"approval_required", "blocked_by_policy_bias"}
+        failure = False if is_guard_block else self._tool_result_failed(result)
+        outcome_class = "blocked" if is_guard_block else "failure" if failure else "success"
+        error_signal = 0.0 if is_guard_block else 1.0 if failure else 0.0
         side_effect_level = side_effect_level_for_tool(tool_name, function_args)
-        reward = compute_reward_score(
-            outcome_class=outcome_class,
-            error_signal=error_signal,
-            latency_ms=duration_ms,
-            side_effect_level=side_effect_level,
+        reward = (
+            0.0
+            if is_guard_block
+            else compute_reward_score(
+                outcome_class=outcome_class,
+                error_signal=error_signal,
+                latency_ms=duration_ms,
+                side_effect_level=side_effect_level,
+            )
         )
         context.metadata.setdefault("turn_tool_names", []).append(tool_name)
         if tool_name in _INSPECT_TOOLS and not failure:
@@ -441,14 +449,53 @@ class PolicyBiasEngine:
         ).hexdigest()
         if fingerprint in self._seen_feedback_fingerprints:
             return
-        if any(tok in lowered for tok in ("concise", "brief", "short", "直接", "简短", "no fluff", "别废话")):
+        concise_request = any(
+            tok in lowered
+            for tok in (
+                "be concise",
+                "keep it concise",
+                "keep it brief",
+                "answer briefly",
+                "concise and direct",
+                "be direct",
+                "简短一点",
+                "直接一点",
+                "别废话",
+                "no fluff",
+            )
+        )
+        one_step_request = any(
+            tok in lowered
+            for tok in (
+                "one step at a time",
+                "next step only",
+                "step by step",
+                "single next step",
+                "一步一步",
+                "下一步就行",
+            )
+        )
+        findings_first_request = any(
+            tok in lowered
+            for tok in (
+                "findings first",
+                "risks first",
+                "structured findings",
+                "review findings first",
+                "debug findings first",
+                "先给结论",
+                "先说问题",
+            )
+        )
+        if concise_request:
             candidate_keys.extend(["communication.concise_first", "user_specific.directness_over_fluff"])
             markers.append("concise-first")
-        if any(tok in lowered for tok in ("one step", "next step", "step by step", "一步", "一步步")):
+        if one_step_request:
             candidate_keys.append("user_specific.one_step_at_a_time")
             markers.append("one-step")
-        if any(tok in lowered for tok in ("findings first", "structured", "review", "debug")):
+        if findings_first_request:
             candidate_keys.append("workflow_specific.structured_debugging_output")
+            markers.append("findings-first")
         if is_correction:
             markers.append("correction")
 
@@ -545,16 +592,21 @@ class PolicyBiasEngine:
         if any(name in {"send_message", "cronjob", "ha_call_service", "terminal", "browser_click", "browser_type", "browser_press"} for name in tool_names):
             if completed and context.metadata.get("has_recent_inspection"):
                 candidates.append("risk.inspect_before_execute")
-            elif context.metadata.get("blocked_tool_names"):
-                candidates.append("risk.inspect_before_execute")
 
         if completed and any(count >= 2 for count in recent_failures.values()):
             candidates.append("tool_use.change_strategy_after_retries")
         elif not completed and any(count >= 2 for count in recent_failures.values()):
             candidates.append("tool_use.change_strategy_after_retries")
 
-        if len(tool_names) >= 3 and completed:
+        planning_tools = {"todo", "clarify"}
+        non_planning = [name for name in tool_names if name not in planning_tools]
+        if completed and any(name in planning_tools for name in tool_names) and len(non_planning) >= 2:
             candidates.append("workflow_specific.decompose_before_act")
+        if self._looks_shared_platform(context.platform) and any(
+            name in {"send_message", "cronjob", "ha_call_service", "browser_click", "browser_type", "browser_press"}
+            for name in tool_names
+        ):
+            candidates.append("platform_specific.group_chat_caution")
 
         return list(dict.fromkeys(candidates))
 
@@ -631,8 +683,6 @@ class PolicyBiasEngine:
             if isinstance(parsed, dict):
                 if parsed.get("success") is False:
                     return True
-                if parsed.get("status") in {"approval_required", "blocked_by_policy_bias"}:
-                    return True
                 exit_code = parsed.get("exit_code")
                 if exit_code is not None and int(exit_code) != 0:
                     return True
@@ -641,9 +691,28 @@ class PolicyBiasEngine:
         return False
 
     @staticmethod
+    def _tool_result_status(result: str) -> str | None:
+        if not result:
+            return None
+        try:
+            parsed = json.loads(result)
+        except Exception:
+            return None
+        if isinstance(parsed, dict):
+            status = parsed.get("status")
+            if isinstance(status, str):
+                return status
+        return None
+
+    @staticmethod
     def _extract_terminal_tool_name(tool_path: str) -> str:
         if not tool_path:
             return ""
         if ">" in tool_path:
             return tool_path.split(">")[-1].strip()
         return tool_path.strip()
+
+    @staticmethod
+    def _looks_shared_platform(platform: str) -> bool:
+        platform = (platform or "").lower()
+        return any(token in platform for token in ("slack", "discord", "teams", "group", "channel"))

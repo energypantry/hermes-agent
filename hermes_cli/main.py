@@ -4798,6 +4798,11 @@ For more help on a command:
     pb_explain.add_argument("--session-id", help="Filter by session ID")
     pb_explain.add_argument("--limit", type=int, default=5, help="Max traces to show")
 
+    pb_audit = policy_bias_sub.add_parser("audit", help="Audit whether stored biases belong in policy bias vs memory/skills")
+    pb_audit.add_argument("--status", choices=["active", "shadow", "disabled", "archived"], help="Filter by status")
+    pb_audit.add_argument("--limit", type=int, default=50, help="Max biases to audit")
+    pb_audit.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+
     pb_history = policy_bias_sub.add_parser("history", help="Show bias change history for audit/rollback")
     pb_history.add_argument("bias_id", help="Bias ID to inspect history for")
     pb_history.add_argument("--limit", type=int, default=20, help="Max history entries to show")

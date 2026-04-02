@@ -17,6 +17,8 @@ hermes policy-bias list
 hermes policy-bias list --status active --json
 hermes policy-bias inspect <bias_id>
 hermes policy-bias inspect <bias_id> --json
+hermes policy-bias audit
+hermes policy-bias audit --status active --json
 ```
 
 ### Enable / Disable / Archive
@@ -73,6 +75,13 @@ With default config these are emitted through normal Hermes logging.
 3. Disable it with `hermes policy-bias disable <bias_id>`
 4. If needed, archive it after review
 
+### A stored item looks like memory or a skill instead of a policy bias
+
+1. Run `hermes policy-bias audit`
+2. Inspect the `action_surfaces`, `why_not_memory`, and `why_not_skill` fields
+3. If the classification looks wrong, disable the bias and move the content to `USER.md`, `MEMORY.md`, or a skill as appropriate
+4. Rebuild or rescore after cleaning up the underlying moments if needed
+
 ### A bias regressed after recent evidence
 
 1. Inspect history with `hermes policy-bias history <bias_id>`
@@ -103,6 +112,13 @@ If a bias does not seem to affect behavior:
 5. Check whether prompt injection was token-capped
 6. Check whether the task/tool context actually matches the bias signature
 
+If you are checking for duplicate storage across learning layers:
+
+1. Run `hermes policy-bias audit`
+2. Confirm the bias changes a decision surface rather than only restating a fact
+3. If it looks like a factual preference, move it to memory
+4. If it looks like a reusable playbook, move it to a skill
+
 If the database is corrupted or unavailable:
 
 - Hermes should continue operating without policy-bias influence
@@ -112,6 +128,6 @@ If the database is corrupted or unavailable:
 
 ## Safety Notes
 
-- `risk.inspect_before_execute` can block mutating or external tools until an inspect/search step occurs.
+- `risk.inspect_before_execute` can drive `inspect`, `simulate`, or `confirm` requirements before mutating or external tools proceed.
 - Shadow biases are observable but do not affect action selection.
 - Rollback restores a prior snapshot as a new current version; it does not delete audit history.

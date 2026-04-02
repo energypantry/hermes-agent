@@ -8,7 +8,7 @@ from typing import Optional
 from .explain import build_explanation_payload
 from .models import PolicyBias, PolicyBiasConfig
 from .store import PolicyBiasStore
-from .synthesis import synthesize_bias
+from .synthesis import get_boundary_metadata, synthesize_bias
 
 
 def list_biases(
@@ -41,7 +41,12 @@ def inspect_bias(
         "bias": bias,
         "moments": moments,
         "history": store.list_bias_history(bias_id, limit=20),
+        "boundary": describe_bias_boundary(bias),
     }
+
+
+def describe_bias_boundary(bias: PolicyBias) -> dict[str, object]:
+    return get_boundary_metadata(bias.bias_candidate_key or "")
 
 
 def set_bias_enabled(
@@ -164,6 +169,32 @@ def bias_history(
         }
         for entry in store.list_bias_history(bias_id, limit=limit)
     ]
+
+
+def audit_bias_boundaries(
+    store: PolicyBiasStore,
+    *,
+    profile_id: str,
+    limit: int = 100,
+    status: Optional[str] = None,
+) -> list[dict[str, object]]:
+    statuses = [status] if status else None
+    audited: list[dict[str, object]] = []
+    for bias in store.list_biases(profile_id, statuses=statuses, limit=limit):
+        boundary = describe_bias_boundary(bias)
+        audited.append(
+            {
+                "id": bias.id,
+                "status": bias.status,
+                "scope": bias.scope,
+                "candidate_key": bias.bias_candidate_key,
+                "classification": boundary["classification"],
+                "action_surfaces": boundary["action_surfaces"],
+                "why_not_memory": boundary["why_not_memory"],
+                "why_not_skill": boundary["why_not_skill"],
+            }
+        )
+    return audited
 
 
 def rollback_bias(

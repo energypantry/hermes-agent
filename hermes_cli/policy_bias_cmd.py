@@ -7,6 +7,7 @@ from typing import Any
 
 from agent.policy_bias.governance import (
     archive_bias,
+    audit_bias_boundaries,
     bias_history,
     explain_recent,
     export_stable_biases,
@@ -84,6 +85,7 @@ def run_policy_bias_command(args) -> None:
             bias = payload["bias"]
             moments = payload["moments"]
             history = payload["history"]
+            boundary = payload["boundary"]
             if getattr(args, "json", False):
                 _print_json(
                     {
@@ -100,6 +102,7 @@ def run_policy_bias_command(args) -> None:
                             "condition_signature": bias.condition_signature,
                             "source_moment_ids": bias.source_moment_ids,
                         },
+                        "boundary": boundary,
                         "moments": [
                             {
                                 "id": moment.id,
@@ -134,6 +137,12 @@ def run_policy_bias_command(args) -> None:
             if bias.anti_policy:
                 print(f"anti_policy: {bias.anti_policy}")
             print(f"rationale: {bias.rationale_summary}")
+            print(
+                "boundary: "
+                f"{boundary['classification']} surfaces={', '.join(boundary['action_surfaces']) or '-'}"
+            )
+            print(f"why_not_memory: {boundary['why_not_memory']}")
+            print(f"why_not_skill: {boundary['why_not_skill']}")
             print("evidence moments:")
             for moment in moments:
                 print(
@@ -220,6 +229,30 @@ def run_policy_bias_command(args) -> None:
                 limit=getattr(args, "limit", 5),
             )
             _print_json(payload)
+            return
+
+        if action == "audit":
+            payload = audit_bias_boundaries(
+                store,
+                profile_id=profile_id,
+                limit=getattr(args, "limit", 50),
+                status=getattr(args, "status", None),
+            )
+            if getattr(args, "json", False):
+                _print_json(payload)
+                return
+            if not payload:
+                print("No policy biases found.")
+                return
+            for entry in payload:
+                surfaces = ", ".join(entry["action_surfaces"]) or "-"
+                print(
+                    f"{entry['id']}  [{entry['status']}] [{entry['scope']}] "
+                    f"classification={entry['classification']} surfaces={surfaces}"
+                )
+                print(f"  key: {entry['candidate_key'] or '-'}")
+                print(f"  why_not_memory: {entry['why_not_memory']}")
+                print(f"  why_not_skill: {entry['why_not_skill']}")
             return
 
         if action == "history":

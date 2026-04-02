@@ -6,12 +6,13 @@ Implemented a first-class Policy Bias Engine with:
 
 - moment capture in SQLite
 - deterministic synthesis from repeated/high-signal moments
-- bounded retrieval by profile, scope, and top-k ranking
+- bounded retrieval by profile, scope-balanced selection, and top-k ranking
 - explicit `Decision Priors` prompt injection
 - planner/tool weighting hooks
-- risk gating for external and mutating actions
+- risk gating for external and mutating actions, including inspect / simulate / confirm decisions
 - explainability traces
 - governance controls for enable, disable, archive, history, rollback, rebuild, and export
+- boundary metadata and audit tooling to keep policy bias separate from memory and skills
 
 The engine is integrated into the live Hermes conversation loop in `run_agent.py`, not just a standalone prototype module.
 
@@ -69,37 +70,43 @@ Added tests for:
 
 - schema migration and status-filtered deletion
 - synthesis lifecycle and negative suppression
-- retrieval top-k behavior and profile isolation
+- descriptor boundary validation and audit metadata
+- retrieval top-k behavior, scope-balanced selection, and profile isolation
 - prompt injection bounding
 - planner reranking and risk gating
+- staged risk decisions for inspect / simulate / confirm
 - repeated-success promotion into active bias
 - disabling a bias and verifying influence stops
 - shadow bias observability without behavior impact
 - feedback moment deduplication within a turn
 - bias history and rollback
 - CLI list / disable / export / rollback flows
+- CLI audit / inspect boundary reporting
 - run-loop integration for `Decision Priors` prompt injection and ranked tool surfaces
 
 Verification completed in this environment:
 
 - `py_compile` passed for all new policy-bias modules, CLI entrypoints, and tests
-- custom smoke scripts passed for:
-  - repeated-success synthesis to active bias
-  - next-turn decision-prior injection and tool reranking
-  - governance export / disable / rollback history flow
+- policy-bias focused pytest suite passed:
+  - `tests/agent/test_policy_bias_engine.py`
+  - `tests/hermes_cli/test_policy_bias_cmd.py`
+  - `tests/test_run_agent_policy_bias.py`
+- current focused result after boundary, risk-control, governance, and retrieval fixes: `24 passed`
+- full project `pytest` was executed in a provisioned local virtualenv and produced:
+  - `7536 passed`
+  - `220 skipped`
+  - `1 xpassed`
+  - `21 failed`
 
-Full `pytest` execution was not possible in the current sandbox because:
-
-- no local project virtualenv was present
-- `pytest` and runtime deps were unavailable in system Python
-- outbound network resolution to PyPI / GitHub was unavailable, so `uv` could not fetch missing packages
+The remaining 21 full-suite failures were reproduced on the baseline `main` commit as well, so they are not regressions introduced by the Policy Bias Engine branch.
 
 ## Known Limitations
 
-- full test suite execution is still required in a properly provisioned Hermes dev environment
+- CI or mainline merge validation is still required even though local full-suite execution was completed
 - semantic retrieval is lightweight token-overlap based, not embedding-based
 - rollback restores a prior bias snapshot, but there is no separate visual diff renderer yet
 - export is JSON-oriented governance output, not a full offline training pipeline on its own
+- concise/directness communication biases still lean more on response-policy surfaces than hard tool/risk hooks, so those scopes should be watched closely during future evolution
 
 ## Future Work Toward Offline Weight Updates
 

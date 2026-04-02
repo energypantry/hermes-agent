@@ -14,6 +14,36 @@ Policy bias is intentionally separate from:
 
 Biases are compact, evidence-backed priors. They are not free-form reflections and they are not a long markdown memory file.
 
+## Boundary Rules
+
+Hermes now treats the four learning layers as distinct storage targets:
+
+- short-term context: what matters for the current turn only
+- memory / facts: durable facts about the user, environment, repo, or platform
+- skills / procedures: reusable step-by-step workflows and supporting assets
+- policy bias: compact action priors that tilt future decisions under uncertainty
+
+Use this rule of thumb:
+
+- if the artifact answers "what is true?", it belongs in memory
+- if it answers "how do I do this class of task end-to-end?", it belongs in a skill
+- if it answers "when unsure, which path should Hermes lean toward?", it belongs in policy bias
+
+Examples:
+
+- "The user prefers concise answers." can live in `USER.md`
+- "Default to concise-first responses for this user." is a policy bias because it is the action rule triggered by that fact
+- "How to migrate a Stripe webhook integration safely." is a skill
+- "Inspect before mutating when side effects are present." is a policy bias
+
+Every registered policy-bias candidate now carries explicit boundary metadata:
+
+- which decision surfaces it affects
+- why it is not memory
+- why it is not a skill
+
+Those boundary explanations are exposed through `hermes policy-bias inspect` and `hermes policy-bias audit`.
+
 ## Architecture
 
 ### 1. Moment Layer
@@ -40,6 +70,8 @@ Durable priors are stored as `PolicyBias` objects, keyed by profile and candidat
 - trigger counts and last-triggered time
 - version and rollback metadata
 
+Bias candidates are only synthesized when their descriptor passes the boundary guardrail: it must declare action surfaces plus a rationale for why the artifact belongs in policy bias instead of memory or skills.
+
 ### 3. Retrieval Layer
 
 At decision time Hermes retrieves a bounded bias set using:
@@ -50,7 +82,7 @@ At decision time Hermes retrieves a bounded bias set using:
 - profile isolation
 - active vs shadow filtering
 
-Retrieval is top-k bounded and scoped through config.
+Retrieval is top-k bounded, profile-isolated, and scope-balanced through config. Hermes first preserves high-signal representatives across relevant scopes, then fills remaining slots by score.
 
 ### 4. Injection Layer
 
@@ -63,7 +95,7 @@ Retrieved active biases are applied in four places:
 3. Tool batch ordering
    Tool-call batches can be reordered so inspect/search actions happen before mutating ones.
 4. Risk behavior
-   External or mutating tools can be blocked until an inspect/search/simulate step happens first.
+   External or mutating tools can be forced into inspect, simulate, or explicit-confirm paths before execution.
 
 Shadow biases are retrieved and traced, but do not influence action selection.
 
@@ -98,6 +130,7 @@ The engine is wired into the real Hermes flow in `run_agent.py`:
 - tool definitions are re-ranked before the API call
 - tool batches are reordered when inspect-first policies apply
 - risk gating runs before tool execution
+- risk gating can return inspect / simulate / confirm decisions with suggested next steps
 - tool results create moments
 - turn completion creates moments and triggers synthesis
 - context compression creates checkpoint moments

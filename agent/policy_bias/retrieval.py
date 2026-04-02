@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from typing import Iterable
 
-from .models import PolicyBias, PolicyBiasConfig, RetrievalResult
+from .models import BIAS_SCOPES, PolicyBias, PolicyBiasConfig, RetrievalResult
 from .scoring import (
     apply_confidence_decay,
     lexical_overlap_score,
@@ -41,6 +41,54 @@ def _structured_match_score(
     if bias.scope == "user_specific":
         score += 0.18
     return min(score, 1.0)
+
+
+def _select_scope_balanced(
+    scored: list[tuple[PolicyBias, float]],
+    *,
+    top_k: int,
+    status: str,
+    enabled_scopes: tuple[str, ...],
+) -> list[PolicyBias]:
+    if top_k <= 0:
+        return []
+
+    scope_order = {scope: index for index, scope in enumerate(BIAS_SCOPES)}
+    allowed_scopes = tuple(scope for scope in enabled_scopes if scope in BIAS_SCOPES) or BIAS_SCOPES
+
+    scope_heads: list[tuple[str, tuple[PolicyBias, float]]] = []
+    seen_scopes: set[str] = set()
+    for bias, score in scored:
+        if bias.status != status or bias.scope not in allowed_scopes or bias.scope in seen_scopes:
+            continue
+        scope_heads.append((bias.scope, (bias, score)))
+        seen_scopes.add(bias.scope)
+
+    scope_heads.sort(
+        key=lambda item: (
+            item[1][1],
+            -scope_order.get(item[0], len(scope_order)),
+        ),
+        reverse=True,
+    )
+
+    selected: list[PolicyBias] = []
+    selected_ids: set[str] = set()
+    for _scope, (bias, _score) in scope_heads:
+        selected.append(bias)
+        selected_ids.add(bias.id)
+        if len(selected) >= top_k:
+            return selected
+
+    for bias, _score in scored:
+        if bias.status != status or bias.scope not in allowed_scopes or bias.id in selected_ids:
+            continue
+        selected.append(bias)
+        selected_ids.add(bias.id)
+        if len(selected) >= top_k:
+            break
+
+    return selected
 
 
 def retrieve_biases(
@@ -99,13 +147,18 @@ def retrieve_biases(
         scored.append((bias, score))
 
     scored.sort(key=lambda item: item[1], reverse=True)
-    active_biases: list[PolicyBias] = []
-    shadow_biases: list[PolicyBias] = []
-    for bias, _score in scored:
-        if bias.status == "active" and len(active_biases) < config.retrieval_top_k:
-            active_biases.append(bias)
-        elif bias.status == "shadow" and include_shadow and len(shadow_biases) < config.retrieval_top_k:
-            shadow_biases.append(bias)
+    active_biases = _select_scope_balanced(
+        scored,
+        top_k=config.retrieval_top_k,
+        status="active",
+        enabled_scopes=config.scopes_enabled,
+    )
+    shadow_biases = _select_scope_balanced(
+        scored,
+        top_k=config.retrieval_top_k,
+        status="shadow",
+        enabled_scopes=config.scopes_enabled,
+    ) if include_shadow else []
 
     return RetrievalResult(
         active_biases=active_biases,

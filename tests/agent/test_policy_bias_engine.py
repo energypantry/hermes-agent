@@ -6,14 +6,19 @@ import sqlite3
 import time
 
 from agent.policy_bias.engine import PolicyBiasEngine
-from agent.policy_bias.governance import rebuild_biases
+from agent.policy_bias.governance import audit_bias_boundaries, inspect_bias, rebuild_biases
 from agent.policy_bias.injector import build_decision_priors
 from agent.policy_bias.migrations import BASE_SCHEMA_SQL, BASE_SCHEMA_VERSION, SCHEMA_VERSION
 from agent.policy_bias.models import BIAS_SCOPES, PolicyBias, PolicyBiasConfig, PolicyMoment, now_ts
 from agent.policy_bias.planner_hooks import evaluate_risk_gate, rerank_tools
 from agent.policy_bias.retrieval import retrieve_biases
 from agent.policy_bias.store import PolicyBiasStore
-from agent.policy_bias.synthesis import get_candidate_descriptor, synthesize_bias
+from agent.policy_bias.synthesis import (
+    descriptor_qualifies_for_policy_bias,
+    get_boundary_metadata,
+    get_candidate_descriptor,
+    synthesize_bias,
+)
 
 
 def _tool_defs(*names: str) -> list[dict]:
@@ -270,6 +275,19 @@ def test_synthesize_bias_lifecycle_and_negative_suppression():
     assert disabled_bias.confidence <= 0.45
 
 
+def test_candidate_descriptors_carry_boundary_metadata():
+    descriptor = get_candidate_descriptor("planning.inspect_before_edit")
+
+    assert descriptor is not None
+    assert descriptor_qualifies_for_policy_bias(descriptor) is True
+    assert "tool_ranking" in descriptor.action_surfaces
+    assert "not a factual note" in descriptor.why_not_memory
+
+    boundary = get_boundary_metadata("planning.inspect_before_edit")
+    assert boundary["classification"] == "policy_bias"
+    assert "tool_batch" in boundary["action_surfaces"]
+
+
 def test_retrieval_is_top_k_and_profile_isolated(tmp_path):
     store = PolicyBiasStore(db_path=tmp_path / "policy_bias.db")
     try:
@@ -314,6 +332,45 @@ def test_retrieval_is_top_k_and_profile_isolated(tmp_path):
         store.close()
 
 
+def test_retrieval_preserves_scope_coverage_before_duplicate_scope_fill(tmp_path):
+    store = PolicyBiasStore(db_path=tmp_path / "policy_bias.db")
+    try:
+        profile_id = "profile:test"
+        now = time.time()
+        biases = [
+            _make_bias(profile_id, "planning.inspect_before_edit", updated_at=now, confidence=0.92),
+            _make_bias(profile_id, "tool_use.patch_before_rewrite", updated_at=now - 1, confidence=0.95),
+            _make_bias(profile_id, "tool_use.local_before_external_code", updated_at=now - 2, confidence=0.94),
+            _make_bias(profile_id, "risk.inspect_before_execute", updated_at=now - 3, confidence=0.78),
+        ]
+        for bias in biases:
+            store.upsert_bias(bias)
+
+        config = PolicyBiasConfig.from_dict(
+            {"enabled": True, "retrieval_top_k": 3, "scopes_enabled": list(BIAS_SCOPES)}
+        )
+        result = retrieve_biases(
+            store,
+            config=config,
+            profile_id=profile_id,
+            user_message="Inspect the repo, patch the file, and avoid risky external actions",
+            task_type="repo_modification",
+            platform="cli",
+            available_tools=["read_file", "patch", "send_message"],
+            include_shadow=False,
+        )
+
+        selected_keys = {bias.bias_candidate_key for bias in result.active_biases}
+        selected_scopes = {bias.scope for bias in result.active_biases}
+
+        assert len(result.active_biases) == 3
+        assert selected_scopes == {"planning", "tool_use", "risk"}
+        assert "risk.inspect_before_execute" in selected_keys
+        assert sum(1 for bias in result.active_biases if bias.scope == "tool_use") == 1
+    finally:
+        store.close()
+
+
 def test_build_decision_priors_is_bounded():
     biases = [
         _make_bias("profile:test", "planning.inspect_before_edit"),
@@ -335,9 +392,10 @@ def test_planner_reranking_and_risk_gate_apply_active_biases():
         _make_bias("profile:test", "planning.inspect_before_edit"),
         _make_bias("profile:test", "tool_use.patch_before_rewrite"),
         _make_bias("profile:test", "risk.inspect_before_execute"),
+        _make_bias("profile:test", "workflow_specific.decompose_before_act"),
     ]
     ranked_tools, deltas, _planner_effects = rerank_tools(
-        _tool_defs("send_message", "patch", "read_file"),
+        _tool_defs("send_message", "patch", "read_file", "todo"),
         biases,
         user_message="Fix the repo file and then notify the user",
         task_type="repo_modification",
@@ -345,7 +403,7 @@ def test_planner_reranking_and_risk_gate_apply_active_biases():
         recent_failed_tools=[],
     )
 
-    assert [tool["function"]["name"] for tool in ranked_tools][:2] == ["read_file", "patch"]
+    assert [tool["function"]["name"] for tool in ranked_tools][:3] == ["read_file", "todo", "patch"]
     assert any(delta.tool_name == "send_message" and delta.weight_delta < 0 for delta in deltas)
 
     blocked = evaluate_risk_gate(
@@ -354,6 +412,8 @@ def test_planner_reranking_and_risk_gate_apply_active_biases():
         biases,
         require_inspect_first=True,
         has_recent_inspection=False,
+        user_message="Send a message to the customer",
+        platform="cli",
     )
     allowed = evaluate_risk_gate(
         "send_message",
@@ -361,12 +421,25 @@ def test_planner_reranking_and_risk_gate_apply_active_biases():
         biases,
         require_inspect_first=True,
         has_recent_inspection=True,
+        user_message="Please send it to the customer now.",
+        platform="cli",
+    )
+    simulated = evaluate_risk_gate(
+        "browser_click",
+        {"selector": "#submit"},
+        biases,
+        require_inspect_first=True,
+        has_recent_inspection=False,
+        user_message="Click submit",
+        platform="cli",
     )
 
     assert blocked is not None
-    assert blocked.decision == "blocked"
+    assert blocked.decision == "confirm"
     assert blocked.suggested_tool == "web_search"
     assert allowed is None
+    assert simulated is not None
+    assert simulated.decision == "simulate"
 
 
 def test_repeated_success_promotes_active_bias_and_influences_next_turn(tmp_path):
@@ -479,6 +552,48 @@ def test_disabling_bias_stops_influencing_behavior(tmp_path):
         engine.close()
 
 
+def test_policy_guard_blocks_do_not_count_as_failures_or_create_risk_evidence(tmp_path):
+    engine, store = _make_engine(tmp_path)
+    try:
+        bias = _make_bias(engine.profile_id, "risk.inspect_before_execute", status="active")
+        store.upsert_bias(bias)
+
+        ctx = engine.begin_turn(
+            session_id="session-1",
+            turn_index=1,
+            user_message="Send a message to the customer",
+            platform="cli",
+            available_tools=["send_message", "web_search"],
+            tool_defs=_tool_defs("send_message", "web_search"),
+        )
+        blocked = engine.evaluate_risk(
+            ctx,
+            tool_name="send_message",
+            function_args={"message": "hello"},
+        )
+        assert blocked is not None
+
+        engine.record_tool_result(
+            ctx,
+            tool_name="send_message",
+            function_args={"message": "hello"},
+            result='{"success": false, "status": "blocked_by_policy_bias"}',
+            duration_ms=1,
+        )
+        engine.record_turn_outcome(
+            ctx,
+            final_response="",
+            completed=False,
+            interrupted=False,
+        )
+
+        assert ctx.metadata.get("tool_failures", {}) == {}
+        assert store.get_moments_by_candidate(engine.profile_id, "risk.inspect_before_execute") == []
+        assert store.get_moments_by_candidate(engine.profile_id, "tool_use.change_strategy_after_retries") == []
+    finally:
+        engine.close()
+
+
 def test_bias_history_and_rollback_restore_prior_version(tmp_path):
     store = PolicyBiasStore(db_path=tmp_path / "policy_bias.db")
     try:
@@ -501,6 +616,24 @@ def test_bias_history_and_rollback_restore_prior_version(tmp_path):
         assert restored.version == 3
         assert restored.rollback_parent_id == f"{bias.id}:v2"
         assert history[0].operation == "rollback_to_v1"
+    finally:
+        store.close()
+
+
+def test_inspect_and_boundary_audit_explain_why_bias_is_not_memory_or_skill(tmp_path):
+    store = PolicyBiasStore(db_path=tmp_path / "policy_bias.db")
+    try:
+        bias = _make_bias("profile:test", "tool_use.patch_before_rewrite")
+        store.upsert_bias(bias)
+
+        inspected = inspect_bias(store, bias_id=bias.id)
+        audited = audit_bias_boundaries(store, profile_id="profile:test", limit=10)
+
+        assert inspected is not None
+        assert inspected["boundary"]["classification"] == "policy_bias"
+        assert "edit strategy" in inspected["boundary"]["why_not_memory"]
+        assert audited[0]["candidate_key"] == "tool_use.patch_before_rewrite"
+        assert "tool_ranking" in audited[0]["action_surfaces"]
     finally:
         store.close()
 
@@ -562,5 +695,26 @@ def test_feedback_moments_are_deduplicated_within_a_turn(tmp_path):
 
         assert len(concise_moments) == 1
         assert len(direct_moments) == 1
+    finally:
+        engine.close()
+
+
+def test_generic_debug_words_do_not_promote_structured_output_bias(tmp_path):
+    engine, store = _make_engine(tmp_path)
+    try:
+        engine.begin_turn(
+            session_id="session-1",
+            turn_index=1,
+            user_message="Please review this bug in the repo",
+            platform="cli",
+            available_tools=["read_file", "patch"],
+            tool_defs=_tool_defs("read_file", "patch"),
+        )
+
+        findings_moments = store.get_moments_by_candidate(
+            engine.profile_id,
+            "workflow_specific.structured_debugging_output",
+        )
+        assert findings_moments == []
     finally:
         engine.close()

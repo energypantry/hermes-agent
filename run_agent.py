@@ -5735,10 +5735,19 @@ class AIAgent:
         if not {
             "planning.inspect_before_edit",
             "risk.inspect_before_execute",
+            "workflow_specific.decompose_before_act",
+            "user_specific.one_step_at_a_time",
         } & keys:
             return False
 
         names = [tc.function.name for tc in tool_calls]
+        if "user_specific.one_step_at_a_time" in keys and len(names) > 1:
+            return True
+        if "workflow_specific.decompose_before_act" in keys:
+            has_planning = any(name in {"todo", "clarify"} for name in names)
+            has_execution = any(name in {"write_file", "patch", "terminal", "browser_click", "browser_type", "browser_press", "send_message", "cronjob", "ha_call_service"} for name in names)
+            if has_planning and has_execution:
+                return True
         has_inspect = any(name in {"read_file", "search_files", "browser_snapshot", "web_search", "web_extract"} for name in names)
         has_mutating = any(name in {"write_file", "patch", "terminal", "browser_click", "browser_type", "browser_press", "send_message", "cronjob", "ha_call_service"} for name in names)
         return has_inspect and has_mutating
