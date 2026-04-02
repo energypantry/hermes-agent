@@ -101,6 +101,7 @@ from agent.trajectory import (
     save_trajectory as _save_trajectory_to_file,
 )
 from agent.policy_bias import PolicyBiasEngine, make_blocked_tool_result
+from agent.policy_bias.response_hooks import apply_response_controls
 from utils import atomic_json_write
 
 HONCHO_TOOL_NAMES = {
@@ -5752,6 +5753,27 @@ class AIAgent:
         has_mutating = any(name in {"write_file", "patch", "terminal", "browser_click", "browser_type", "browser_press", "send_message", "cronjob", "ha_call_service"} for name in names)
         return has_inspect and has_mutating
 
+    def _apply_policy_response_controls(self, final_response: str, messages: list[dict]) -> str:
+        """Apply deterministic response-policy hooks after generation."""
+        ctx = getattr(self, "_policy_turn_context", None)
+        engine = getattr(self, "_policy_bias_engine", None)
+        if not final_response or not ctx or not engine or not engine.is_enabled():
+            return final_response
+
+        controls = ctx.metadata.get("response_controls", {})
+        updated, effects = apply_response_controls(final_response, controls)
+        if effects:
+            try:
+                engine.record_response_effects(ctx, effects)
+            except Exception as exc:
+                logger.debug("Policy bias response effect trace failed: %s", exc)
+            for idx in range(len(messages) - 1, -1, -1):
+                msg = messages[idx]
+                if msg.get("role") == "assistant" and not msg.get("tool_calls"):
+                    msg["content"] = updated
+                    break
+        return updated
+
     def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute multiple tool calls concurrently using a thread pool.
 
@@ -8493,8 +8515,10 @@ class AIAgent:
                     
                     # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)
                     final_response = self._strip_think_blocks(final_response).strip()
+                    final_response = self._apply_policy_response_controls(final_response, messages)
                     
                     final_msg = self._build_assistant_message(assistant_message, finish_reason)
+                    final_msg["content"] = final_response
                     
                     messages.append(final_msg)
                     
@@ -8561,6 +8585,8 @@ class AIAgent:
             if self.iteration_budget.remaining <= 0 and not self.quiet_mode:
                 print(f"\n⚠️  Iteration budget exhausted ({self.iteration_budget.used}/{self.iteration_budget.max_total} iterations used)")
             final_response = self._handle_max_iterations(messages, api_call_count)
+
+        final_response = self._apply_policy_response_controls(final_response, messages)
         
         # Determine if conversation completed successfully
         completed = final_response is not None and api_call_count < self.max_iterations

@@ -186,6 +186,10 @@ def test_store_migrates_v1_schema_to_current(tmp_path):
             row["name"]
             for row in store._conn.execute("PRAGMA table_info(biases)").fetchall()
         }
+        trace_columns = {
+            row["name"]
+            for row in store._conn.execute("PRAGMA table_info(decision_traces)").fetchall()
+        }
         tables = {
             row["name"]
             for row in store._conn.execute(
@@ -195,6 +199,7 @@ def test_store_migrates_v1_schema_to_current(tmp_path):
         assert version == SCHEMA_VERSION
         assert "disabled_reason" in columns
         assert "decision_traces" in tables
+        assert "response_effects" in trace_columns
     finally:
         store.close()
 

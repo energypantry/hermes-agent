@@ -7,6 +7,7 @@ SQLite database path:
 - `~/.hermes/policy_bias.db`
 
 Schema version is tracked in `schema_version`.
+Current schema version: `4`.
 
 ## Table: `moments`
 
@@ -97,6 +98,7 @@ Key columns:
 - `planner_effects`
 - `tool_weight_deltas`
 - `risk_actions`
+- `response_effects`
 - `evidence_summary`
 - `created_at`
 
@@ -145,6 +147,7 @@ The persistence model supports:
 - version increments on updates
 - explicit status transitions
 - historical snapshots for audit and rollback
+- response-policy effects captured alongside planner/tool/risk traces for later explanation
 
 ## Export Shape
 

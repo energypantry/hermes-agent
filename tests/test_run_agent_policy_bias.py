@@ -150,3 +150,66 @@ def test_one_step_bias_forces_sequential_tool_batches():
     ]
 
     assert agent._policy_requires_sequential_tool_batch(tool_calls) is True
+
+
+def test_policy_response_controls_strip_fluff_and_add_findings_heading():
+    with (
+        patch(
+            "run_agent.get_tool_definitions",
+            return_value=_make_tool_defs("read_file"),
+        ),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.client = MagicMock()
+
+    context = BiasDecisionContext(
+        session_id="session-1",
+        turn_index=1,
+        task_type="repo_modification",
+        platform="cli",
+        user_message="Review this bug and give findings first. Be concise and direct.",
+        ranked_tools=_make_tool_defs("read_file"),
+        metadata={
+            "response_controls": {
+                "strip_leading_acknowledgement": True,
+                "drop_trailing_offer": True,
+                "findings_first_heading": True,
+            },
+        },
+    )
+    stub_engine = _StubPolicyBiasEngine(context)
+    stub_engine.record_response_effects = MagicMock()
+    agent._policy_bias_engine = stub_engine
+    agent._base_tools = _make_tool_defs("read_file")
+    agent.valid_tool_names = {"read_file"}
+
+    response_text = (
+        "Got it.\n\n"
+        "The failure is caused by a missing guard in the file loader.\n\n"
+        "Let me know if you want a deeper walkthrough."
+    )
+
+    with (
+        patch.object(agent, "_interruptible_api_call", return_value=_mock_response(response_text)),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_honcho_sync"),
+        patch.object(agent, "_queue_honcho_prefetch"),
+    ):
+        result = agent.run_conversation(
+            "Review this bug and give findings first. Be concise and direct.",
+            sync_honcho=False,
+        )
+
+    assert result["final_response"] == (
+        "**Findings**\nThe failure is caused by a missing guard in the file loader."
+    )
+    stub_engine.record_response_effects.assert_called_once()

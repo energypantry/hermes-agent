@@ -49,6 +49,7 @@ def decision_trace_summary(trace: DecisionTrace) -> dict[str, object]:
         "planner_effects": list(trace.planner_effects),
         "tool_weight_deltas": list(trace.tool_weight_deltas),
         "risk_actions": list(trace.risk_actions),
+        "response_effects": list(trace.response_effects),
         "evidence_summary": list(trace.evidence_summary),
         "created_at": trace.created_at,
     }

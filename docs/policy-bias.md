@@ -97,6 +97,12 @@ Retrieved active biases are applied in four places:
 4. Risk behavior
    External or mutating tools can be forced into inspect, simulate, or explicit-confirm paths before execution.
 
+Hermes now also applies deterministic response controls for relevant active biases:
+
+- concise/directness biases can strip low-signal acknowledgements and trailing filler offers from the final answer
+- structured debugging biases can enforce a findings-first heading on debugging/review style replies
+- those response effects are captured in decision traces for explainability
+
 Shadow biases are retrieved and traced, but do not influence action selection.
 
 ### 5. Synthesis Layer
@@ -131,6 +137,7 @@ The engine is wired into the real Hermes flow in `run_agent.py`:
 - tool batches are reordered when inspect-first policies apply
 - risk gating runs before tool execution
 - risk gating can return inspect / simulate / confirm decisions with suggested next steps
+- final responses can be post-processed by deterministic response-policy hooks when active biases require concise/direct or findings-first behavior
 - tool results create moments
 - turn completion creates moments and triggers synthesis
 - context compression creates checkpoint moments

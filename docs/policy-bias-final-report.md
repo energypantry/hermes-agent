@@ -10,6 +10,7 @@ Implemented a first-class Policy Bias Engine with:
 - explicit `Decision Priors` prompt injection
 - planner/tool weighting hooks
 - risk gating for external and mutating actions, including inspect / simulate / confirm decisions
+- deterministic response-policy hooks for concise/direct and findings-first behavior, with traceable response effects
 - explainability traces
 - governance controls for enable, disable, archive, history, rollback, rebuild, and export
 - boundary metadata and audit tooling to keep policy bias separate from memory and skills
@@ -30,6 +31,7 @@ The engine is integrated into the live Hermes conversation loop in `run_agent.py
 - `agent/policy_bias/explain.py`
 - `agent/policy_bias/governance.py`
 - `agent/policy_bias/engine.py`
+- `agent/policy_bias/response_hooks.py`
 - `hermes_cli/policy_bias_cmd.py`
 - `docs/policy-bias-implementation-plan.md`
 - `docs/policy-bias.md`
@@ -50,13 +52,14 @@ The engine is integrated into the live Hermes conversation loop in `run_agent.py
 
 - Added dedicated SQLite database: `~/.hermes/policy_bias.db`
 - Added schema versioning through `agent/policy_bias/migrations.py`
-- Current schema version after this work: `3`
+- Current schema version after this work: `4`
 
 Schema evolution:
 
 1. base schema: `moments` and `biases`
 2. v2: `decision_traces` and `disabled_reason`
 3. v3: `bias_history` for audit and rollback
+4. v4: `response_effects` on `decision_traces`
 
 Rollback notes:
 
@@ -75,6 +78,7 @@ Added tests for:
 - prompt injection bounding
 - planner reranking and risk gating
 - staged risk decisions for inspect / simulate / confirm
+- deterministic response-policy controls and trace recording
 - repeated-success promotion into active bias
 - disabling a bias and verifying influence stops
 - shadow bias observability without behavior impact
@@ -83,6 +87,7 @@ Added tests for:
 - CLI list / disable / export / rollback flows
 - CLI audit / inspect boundary reporting
 - run-loop integration for `Decision Priors` prompt injection and ranked tool surfaces
+- run-loop integration for final-response post-processing under active communication / workflow biases
 
 Verification completed in this environment:
 
@@ -91,9 +96,9 @@ Verification completed in this environment:
   - `tests/agent/test_policy_bias_engine.py`
   - `tests/hermes_cli/test_policy_bias_cmd.py`
   - `tests/test_run_agent_policy_bias.py`
-- current focused result after boundary, risk-control, governance, and retrieval fixes: `24 passed`
+- current focused result after response-hook and trace fixes: `25 passed`
 - full project `pytest` was executed in a provisioned local virtualenv and produced:
-  - `7536 passed`
+  - `7537 passed`
   - `220 skipped`
   - `1 xpassed`
   - `21 failed`
@@ -106,7 +111,7 @@ The remaining 21 full-suite failures were reproduced on the baseline `main` comm
 - semantic retrieval is lightweight token-overlap based, not embedding-based
 - rollback restores a prior bias snapshot, but there is no separate visual diff renderer yet
 - export is JSON-oriented governance output, not a full offline training pipeline on its own
-- concise/directness communication biases still lean more on response-policy surfaces than hard tool/risk hooks, so those scopes should be watched closely during future evolution
+- concise/directness and findings-first biases now have deterministic response hooks, but they still do not influence planner/risk as strongly as planning/tool_use/risk scopes
 
 ## Future Work Toward Offline Weight Updates
 

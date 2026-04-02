@@ -475,8 +475,8 @@ class PolicyBiasStore:
                     id, profile_id, session_id, turn_index, task_type, platform,
                     user_message_excerpt, retrieved_bias_ids, injected_bias_ids,
                     shadow_bias_ids, planner_effects, tool_weight_deltas,
-                    risk_actions, evidence_summary, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    risk_actions, response_effects, evidence_summary, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     trace.id,
@@ -492,6 +492,7 @@ class PolicyBiasStore:
                     _json_dumps(trace.planner_effects),
                     _json_dumps(trace.tool_weight_deltas),
                     _json_dumps(trace.risk_actions),
+                    _json_dumps(trace.response_effects),
                     _json_dumps(trace.evidence_summary),
                     trace.created_at,
                 ),
@@ -704,6 +705,7 @@ class PolicyBiasStore:
             planner_effects=_json_loads(row["planner_effects"], default=[]),
             tool_weight_deltas=_json_loads(row["tool_weight_deltas"], default=[]),
             risk_actions=_json_loads(row["risk_actions"], default=[]),
+            response_effects=_json_loads(row["response_effects"], default=[]),
             evidence_summary=_json_loads(row["evidence_summary"], default=[]),
             created_at=float(row["created_at"]),
         )

@@ -62,6 +62,7 @@ Useful log events:
 - retrieval hits
 - planner/tool weighting deltas
 - risk gating blocks
+- response-policy effects
 - explainability traces
 
 With default config these are emitted through normal Hermes logging.
@@ -110,7 +111,8 @@ If a bias does not seem to affect behavior:
 3. Inspect whether the bias is `active` vs `shadow`
 4. Review recent decision traces with `explain`
 5. Check whether prompt injection was token-capped
-6. Check whether the task/tool context actually matches the bias signature
+6. Check whether response-policy effects were recorded in the trace when the bias should shape the final answer
+7. Check whether the task/tool context actually matches the bias signature
 
 If you are checking for duplicate storage across learning layers:
 

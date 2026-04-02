@@ -191,6 +191,7 @@ class DecisionTrace:
     planner_effects: list[dict[str, Any]] = field(default_factory=list)
     tool_weight_deltas: list[dict[str, Any]] = field(default_factory=list)
     risk_actions: list[dict[str, Any]] = field(default_factory=list)
+    response_effects: list[dict[str, Any]] = field(default_factory=list)
     evidence_summary: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=now_ts)
 

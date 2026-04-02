@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 BASE_SCHEMA_VERSION = 1
 
@@ -126,5 +126,8 @@ MIGRATIONS: dict[int, list[str]] = {
         CREATE INDEX IF NOT EXISTS idx_bias_history_profile_created
             ON bias_history(profile_id, created_at DESC)
         """,
+    ],
+    4: [
+        "ALTER TABLE decision_traces ADD COLUMN response_effects TEXT NOT NULL DEFAULT '[]'",
     ],
 }

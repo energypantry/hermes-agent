@@ -23,6 +23,7 @@ from .models import (
     now_ts,
 )
 from .planner_hooks import evaluate_risk_gate, rerank_tool_calls, rerank_tools
+from .response_hooks import derive_response_controls
 from .retrieval import retrieve_biases
 from .scoring import (
     classify_task_type,
@@ -161,6 +162,7 @@ class PolicyBiasEngine:
                 for delta in tool_deltas
             ],
             risk_actions=[],
+            response_effects=[],
             evidence_summary=[bias_summary(bias) for bias in retrieval.active_biases],
         )
         self.store.save_decision_trace(trace)
@@ -197,6 +199,12 @@ class PolicyBiasEngine:
                 "planner_effects": planner_effects,
                 "turn_tool_names": [],
                 "risk_actions": [],
+                "response_controls": derive_response_controls(
+                    retrieval.active_biases,
+                    task_type=task_type,
+                    user_message=user_message,
+                ),
+                "response_effects": [],
                 "blocked_tool_names": [],
                 "injected_bias_ids": list(injected_ids),
             },
@@ -667,9 +675,20 @@ class PolicyBiasEngine:
                 for delta in context.tool_weight_deltas
             ],
             risk_actions=context.metadata.get("risk_actions", []),
+            response_effects=context.metadata.get("response_effects", []),
             evidence_summary=[bias_summary(bias) for bias in context.active_biases],
         )
         self.store.save_decision_trace(trace)
+
+    def record_response_effects(
+        self,
+        context: Optional[BiasDecisionContext],
+        response_effects: list[dict[str, object]],
+    ) -> None:
+        if context is None or not self.is_enabled() or not response_effects:
+            return
+        context.metadata.setdefault("response_effects", []).extend(response_effects)
+        self._save_trace_update(context)
 
     @staticmethod
     def _tool_result_failed(result: str) -> bool:
