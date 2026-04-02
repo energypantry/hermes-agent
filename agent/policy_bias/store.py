@@ -794,6 +794,7 @@ class PolicyBiasStore:
                 """,
                 (moment.profile_id,),
             ).fetchall()
+            existing_keys = {row["dimension_key"] for row in rows}
             state_by_key = {
                 row["dimension_key"]: self._policy_state_dimension_from_row(row)
                 for row in rows
@@ -836,7 +837,7 @@ class PolicyBiasStore:
                     """,
                     self._policy_state_update_sql_values(update),
                 )
-                if update.dimension_key in state_by_key:
+                if update.dimension_key in existing_keys:
                     conn.execute(
                         self._policy_state_dimension_update_sql(),
                         self._policy_state_dimension_update_values(updated),
@@ -853,6 +854,7 @@ class PolicyBiasStore:
                         """,
                         self._policy_state_dimension_sql_values(updated),
                     )
+                    existing_keys.add(update.dimension_key)
                 state_by_key[update.dimension_key] = updated
             return updates
 
