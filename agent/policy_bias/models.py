@@ -247,12 +247,14 @@ class PolicyStatePlan:
     clarify_priority: float = 0.0
     max_tool_calls_per_turn: int = 0
     max_parallel_tools: int = 0
+    action_surface_scores: dict[str, float] = field(default_factory=dict)
     execution_mode_scores: dict[str, float] = field(default_factory=dict)
     runtime_coverage_score: float = 0.0
     response_directness: float = 0.0
     findings_first_priority: float = 0.0
     single_step_priority: float = 0.0
     shared_channel_caution: float = 0.0
+    response_shape_scores: dict[str, float] = field(default_factory=dict)
     require_sequential: bool = False
     preferred_risk_mode: str = "direct"
     prompt_mode: str = "minimal"

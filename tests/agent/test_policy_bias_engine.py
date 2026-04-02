@@ -557,7 +557,9 @@ def test_policy_state_plan_compiles_arbitration_and_minimal_prompt_hints():
     assert plan.max_tool_calls_per_turn == 1
     assert plan.max_parallel_tools == 1
     assert "execution_budget" in plan.runtime_surfaces
+    assert plan.action_surface_scores["inspect_local"] > plan.action_surface_scores["mutate_local"]
     assert plan.execution_mode_scores["confirm"] > plan.execution_mode_scores["direct"]
+    assert plan.response_shape_scores["single_step"] >= 0.35
     assert plan.runtime_coverage_score >= 0.72
     assert plan.tool_class_weights["inspect"] > 0.8
     assert len(plan.prompt_hint_keys) <= 3
@@ -591,7 +593,9 @@ def test_policy_state_plan_arbitrates_clarify_first_and_conflicts():
     assert plan.prompt_mode == "off"
     assert plan.execution_mode_scores["clarify"] >= 0.55
     assert plan.execution_mode_scores["confirm"] > plan.execution_mode_scores["direct"]
+    assert plan.action_surface_scores["clarify"] >= 0.55
     assert plan.tool_class_weights["clarify"] > 0.55
+    assert plan.response_shape_scores["structured_debug"] >= 0.35
     assert plan.response_controls["findings_first_heading"] is True
     assert plan.response_controls["max_numbered_steps"] == 1
     assert any(
@@ -618,8 +622,10 @@ def test_policy_state_plan_summary_is_emitted_for_explainability():
     assert summary["kind"] == "policy_state_plan"
     assert summary["findings_first_priority"] > 0
     assert "planner_mode" in summary
+    assert "action_surface_scores" in summary
     assert "tool_class_weights" in summary
     assert "execution_mode_scores" in summary
+    assert "response_shape_scores" in summary
     assert "runtime_coverage_score" in summary
     assert "runtime_surfaces" in summary
     assert isinstance(summary["arbitration_notes"], list)
@@ -806,6 +812,41 @@ def test_policy_state_execution_mode_scores_drive_browser_simulation():
     assert blocked is not None
     assert blocked.decision == "simulate"
     assert blocked.suggested_tool == "browser_snapshot"
+
+
+def test_policy_state_action_surfaces_drive_local_inspection_reranking():
+    policy_state = [
+        _make_state_dimension("profile:test", "inspect_tendency", value=0.84),
+        _make_state_dimension("profile:test", "local_first_tendency", value=0.92),
+        _make_state_dimension("profile:test", "decomposition_tendency", value=0.62),
+    ]
+    plan = compile_state_plan(
+        policy_state,
+        task_type="repo_modification",
+        platform="cli",
+        user_message="Inspect the repo carefully before changing anything.",
+        available_tools=["read_file", "web_search", "patch", "todo"],
+        recent_failed_tools=[],
+    )
+
+    ranked_tools, deltas, planner_effects = rerank_tools(
+        _tool_defs("web_search", "patch", "read_file", "todo"),
+        [],
+        user_message="Inspect the repo carefully before changing anything.",
+        task_type="repo_modification",
+        platform="cli",
+        recent_failed_tools=[],
+        policy_state=policy_state,
+        policy_state_plan=plan,
+    )
+
+    assert plan.action_surface_scores["inspect_local"] > plan.action_surface_scores["inspect_external"]
+    assert [tool["function"]["name"] for tool in ranked_tools][:2] == ["read_file", "todo"]
+    assert any(
+        delta.tool_name == "read_file" and "policy-surface:inspect_local" in delta.reasons
+        for delta in deltas
+    )
+    assert any(effect["tool_name"] == "read_file" for effect in planner_effects)
 
 
 def test_policy_state_response_budget_limits_numbered_steps():

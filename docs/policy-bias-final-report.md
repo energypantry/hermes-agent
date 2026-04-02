@@ -19,6 +19,7 @@ Implemented a first-class Policy Bias Engine with:
 - a V2.1 compiler surface with explicit `planner_mode`, `clarify_priority`, `tool_class_weights`, response budgets, and conflict-resolution metadata
 - a V2.2 runtime substrate with action-budget controls (`max_tool_calls_per_turn`, `max_parallel_tools`) and stronger state-prompt suppression when runtime coverage is already high
 - a V2.3 execution substrate with explicit `execution_mode_scores` and `runtime_coverage_score`, allowing risk behavior to consume graded preferences instead of only discrete modes
+- a V2.4 substrate-scoring layer with explicit `action_surface_scores` and `response_shape_scores`, allowing planner and response shaping to consume shared compiled surfaces instead of only class weights and boolean flags
 - a `policy-bias state ...` CLI subtree backed by the policy-state store for inspection, rebuild, reset, and explain flows
 
 The engine is integrated into the live Hermes conversation loop in `run_agent.py`, not just a standalone prototype module.
@@ -102,6 +103,8 @@ Added tests for:
 - deterministic response-policy controls and trace recording
 - policy-state action-budget limits for tool batch breadth, worker caps, and state-only runtime coverage
 - policy-state execution-mode scoring for `direct / inspect / simulate / confirm / clarify`
+- policy-state action-surface scoring for `inspect_local / inspect_external / plan / clarify / mutate_local / mutate_external`
+- policy-state response-shape scoring for `concise / findings_first / single_step / structured_debug`
 - repeated-success promotion into active bias
 - disabling a bias and verifying influence stops
 - shadow bias observability without behavior impact
@@ -119,12 +122,12 @@ Verification completed in this environment:
   - `tests/agent/test_policy_bias_engine.py`
   - `tests/hermes_cli/test_policy_bias_cmd.py`
   - `tests/test_run_agent_policy_bias.py`
-- current focused result after compiler, action-budget, and execution-mode-score validation: `46 passed`
+- current focused result after compiler, action-budget, execution-mode-score, and substrate-score validation: `47 passed`
 - full project `pytest` was executed in a provisioned local virtualenv and produced:
-  - `7599 passed`
+  - `7625 passed`
   - `220 skipped`
   - `1 xpassed`
-  - `62 failed`
+  - `37 failed`
 
 The remaining full-suite failures in this environment are concentrated outside the policy-bias focused surfaces and still require separate mainline cleanup.
 

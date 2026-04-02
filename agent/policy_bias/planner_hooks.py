@@ -52,6 +52,52 @@ def _candidate_keys(biases: Iterable[PolicyBias]) -> set[str]:
     return {bias.bias_candidate_key or "" for bias in biases}
 
 
+def _action_surface_coefficients(tool_name: str) -> dict[str, float]:
+    if tool_name in {"read_file", "search_files"}:
+        return {"inspect_local": 1.0, "plan": 0.12}
+    if tool_name in {"browser_snapshot", "web_search", "web_extract", "ha_get_state", "ha_list_entities", "ha_list_services"}:
+        return {"inspect_external": 1.0, "clarify": 0.08}
+    if tool_name == "browser_navigate":
+        return {"inspect_external": 0.55, "mutate_external": 0.18}
+    if tool_name == "todo":
+        return {"plan": 1.0, "clarify": 0.12}
+    if tool_name == "clarify":
+        return {"clarify": 1.0, "plan": 0.24}
+    if tool_name == "patch":
+        return {"mutate_local": 0.72, "inspect_local": -0.26, "plan": -0.22, "clarify": -0.18}
+    if tool_name == "write_file":
+        return {"mutate_local": 0.56, "inspect_local": -0.30, "plan": -0.20, "clarify": -0.18}
+    if tool_name == "terminal":
+        return {"mutate_local": 0.42, "inspect_local": 0.16, "plan": -0.16, "clarify": -0.12}
+    if tool_name in {"browser_click", "browser_type", "browser_press", "send_message", "cronjob", "ha_call_service"}:
+        return {"mutate_external": 0.72, "inspect_external": -0.22, "clarify": -0.22}
+    return {}
+
+
+def _apply_action_surface_delta(
+    *,
+    tool_name: str,
+    action_surface_scores: dict[str, float],
+    scale: float = 1.0,
+) -> tuple[float, list[str]]:
+    coefficients = _action_surface_coefficients(tool_name)
+    if not coefficients or not action_surface_scores:
+        return 0.0, []
+
+    delta = 0.0
+    reasons: list[str] = []
+    for surface, coefficient in coefficients.items():
+        score = float(action_surface_scores.get(surface, 0.0))
+        if abs(score) < 1e-6:
+            continue
+        contribution = score * coefficient * scale
+        if abs(contribution) < 1e-6:
+            continue
+        delta += contribution
+        reasons.append(f"policy-surface:{surface}")
+    return delta, reasons
+
+
 def rerank_tools(
     tool_defs: list[dict],
     biases: list[PolicyBias],
@@ -77,6 +123,9 @@ def rerank_tools(
     planner_effects: list[dict] = []
     scored: list[tuple[float, int, dict]] = []
     plan_weights = dict(policy_state_plan.tool_class_weights) if policy_state_plan is not None else {}
+    action_surface_scores = (
+        dict(policy_state_plan.action_surface_scores) if policy_state_plan is not None else {}
+    )
     planner_mode = policy_state_plan.planner_mode if policy_state_plan is not None else "direct"
 
     for index, tool_def in enumerate(tool_defs):
@@ -156,6 +205,15 @@ def rerank_tools(
         if "tool_use.change_strategy_after_retries" in keys and tool_name in recent_failed:
             delta -= 1.0
             reasons.append("recent-failing-path")
+
+        if policy_state_plan is not None and action_surface_scores:
+            surface_delta, surface_reasons = _apply_action_surface_delta(
+                tool_name=tool_name,
+                action_surface_scores=action_surface_scores,
+                scale=1.05,
+            )
+            delta += surface_delta
+            reasons.extend(surface_reasons)
 
         if policy_state_plan is not None and plan_weights:
             inspect_weight = max(0.0, float(plan_weights.get("inspect", 0.0)))
@@ -291,6 +349,9 @@ def rerank_tool_calls(
     }
     recent_failed = set(recent_failed_tools or [])
     plan_weights = dict(policy_state_plan.tool_class_weights) if policy_state_plan is not None else {}
+    action_surface_scores = (
+        dict(policy_state_plan.action_surface_scores) if policy_state_plan is not None else {}
+    )
     if not keys and not state and policy_state_plan is None:
         return parsed_calls, []
 
@@ -314,6 +375,13 @@ def rerank_tool_calls(
                 score -= 6
         if "tool_use.change_strategy_after_retries" in keys and tool_name in recent_failed:
             score -= 25
+        if policy_state_plan is not None and action_surface_scores:
+            surface_delta, _surface_reasons = _apply_action_surface_delta(
+                tool_name=tool_name,
+                action_surface_scores=action_surface_scores,
+                scale=18.0,
+            )
+            score += int(round(surface_delta))
         if policy_state_plan is not None and plan_weights:
             if tool_name in _INSPECT_TOOLS:
                 score += int(18 * max(0.0, float(plan_weights.get("inspect", 0.0))))

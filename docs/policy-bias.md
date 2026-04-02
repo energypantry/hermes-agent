@@ -104,6 +104,8 @@ With V2 policy state, the same surfaces are first fed by a compiled state plan:
 - prompt translation is used only when the runtime still needs a compact hint for the model
 - action budgets can cap how many tool calls Hermes executes before the next model turn, plus how many of those calls may run in parallel
 - execution-mode scores can bias each turn toward `direct`, `inspect`, `simulate`, `confirm`, or `clarify` before any prompt hint is emitted
+- action-surface scores can bias routing toward `inspect_local`, `inspect_external`, `plan`, `clarify`, `mutate_local`, or `mutate_external`
+- response-shape scores can bias replies toward `concise`, `findings_first`, `single_step`, or `structured_debug` before those scores are translated into deterministic output controls
 
 Hermes now also applies deterministic response controls for relevant active biases:
 

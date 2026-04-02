@@ -156,6 +156,24 @@ Examples:
 
 This pushes the substrate closer to an internal behavioral field: the agent is no longer just picking a named mode, it is carrying graded execution preferences that can be consumed by downstream control surfaces.
 
+### 2.9 V2.4 Action-Surface and Response-Shape Scoring
+
+The next upgrade is to stop relying on a narrow set of class weights and boolean response flags and instead compile shared score maps for action surfaces and response shapes.
+
+The compiler should now also emit:
+
+- `action_surface_scores`
+- `response_shape_scores`
+
+Examples:
+
+- repo-local inspection pressure should raise `inspect_local` above `inspect_external`, so planner and tool routing can favor local evidence surfaces before browsing
+- ambiguity plus high caution should raise `clarify` as an action surface, not just a planner mode label
+- concise/debug/review tendencies should compile into `concise`, `findings_first`, `single_step`, and `structured_debug` response-shape scores before they are translated into deterministic response controls
+- planner, response, and tool re-ranking should consume these compiled scores first, with prompt translation staying suppressed when runtime coverage is already strong
+
+This is the next step toward “底蕴”: the runtime is being driven less by isolated rules and more by a compact graded substrate that can influence many downstream actions without becoming a large prompt artifact.
+
 ## Proposed Architecture
 
 ### 1. Moment Layer

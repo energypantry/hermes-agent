@@ -339,46 +339,102 @@ def compile_state_plan(
         notes.append("Planner pressure reduces tool-batch breadth even when parallelism stays available.")
 
     response_controls: dict[str, object] = {}
-    if response_directness >= 0.35:
+    response_shape_scores = _rounded_scores(
+        {
+            "concise": _clamp01(response_directness),
+            "findings_first": _clamp01(findings_first_priority),
+            "single_step": _clamp01(single_step_priority),
+            "structured_debug": _clamp01(
+                max(findings_first_priority, (0.55 * planning_priority) + (0.15 * execution_caution))
+                if _is_debug_request(user_message=user_message, task_type=task_type)
+                else 0.0
+            ),
+        }
+    )
+
+    if response_shape_scores.get("concise", 0.0) >= 0.35:
         response_controls["strip_leading_acknowledgement"] = True
         response_controls["drop_trailing_offer"] = True
         notes.append("Response directness strips acknowledgement and trailing offer boilerplate.")
-    if findings_first_priority >= 0.35:
+    if max(
+        response_shape_scores.get("findings_first", 0.0),
+        response_shape_scores.get("structured_debug", 0.0),
+    ) >= 0.35:
         response_controls["findings_first_heading"] = True
         notes.append("Findings-first tendency restructures debug/review responses.")
-    if single_step_priority >= 0.35:
+    if response_shape_scores.get("single_step", 0.0) >= 0.35:
         response_controls["prefer_single_step"] = True
         response_controls["max_numbered_steps"] = 1
 
-    tool_class_weights = _rounded_weights(
+    action_surface_scores = _rounded_scores(
         {
-            "inspect": _clamp01(
-                (0.85 * planning_priority)
-                + (0.35 * execution_caution)
-                + (0.15 if planner_mode == "inspect_first" else 0.0)
+            "inspect_local": _clamp01(
+                ((0.72 * planning_priority) + (0.65 * local_first_priority) + (0.18 * execution_caution))
+                if task_type == "repo_modification"
+                else 0.0
             ),
-            "planning": _clamp01(
+            "inspect_external": _clamp01(
+                (0.58 * planning_priority)
+                + (0.40 * execution_caution)
+                + (0.24 if task_type == "current_info" else 0.0)
+                - ((0.42 * local_first_priority) if task_type == "repo_modification" else 0.0)
+                - (0.10 * shared_caution)
+            ),
+            "plan": _clamp01(
                 (0.75 * planning_priority)
-                + (0.35 * single_step_priority)
-                + (0.20 if planner_mode in {"decompose_first", "clarify_first"} else 0.0)
+                + (0.30 * single_step_priority)
+                + (0.22 if planner_mode in {"decompose_first", "clarify_first"} else 0.0)
             ),
             "clarify": _clamp01(
                 clarify_priority + (0.15 if planner_mode == "clarify_first" else 0.0)
             ),
+            "mutate_local": _clamp01(
+                ((0.46 * (1.0 - execution_caution)) + (0.18 * local_first_priority))
+                if task_type == "repo_modification"
+                else 0.0
+            ),
+            "mutate_external": _clamp01(
+                (0.34 * (1.0 - execution_caution))
+                + (0.12 if task_type == "current_info" else 0.0)
+                - (0.34 * shared_caution)
+                - ((0.28 * local_first_priority) if task_type == "repo_modification" else 0.0)
+                - (0.18 * clarify_priority)
+            ),
+        }
+    )
+
+    tool_class_weights = _rounded_weights(
+        {
+            "inspect": _clamp01(
+                (0.64 * max(action_surface_scores.get("inspect_local", 0.0), action_surface_scores.get("inspect_external", 0.0)))
+                + (0.24 * execution_caution)
+                + (0.15 if planner_mode == "inspect_first" else 0.0)
+            ),
+            "planning": _clamp01(
+                (0.82 * action_surface_scores.get("plan", 0.0))
+                + (0.18 * single_step_priority)
+                + (0.20 if planner_mode in {"decompose_first", "clarify_first"} else 0.0)
+            ),
+            "clarify": _clamp01(
+                action_surface_scores.get("clarify", 0.0)
+            ),
             "local": _clamp01(
-                (0.90 * local_first_priority) + (0.10 * planning_priority)
+                (0.88 * action_surface_scores.get("inspect_local", 0.0))
+                + (0.08 * action_surface_scores.get("mutate_local", 0.0))
             ) if task_type == "repo_modification" else 0.0,
             "mutating": -_clamp01(
-                (0.30 * planning_priority)
+                (0.34 * planning_priority)
                 + (0.45 * execution_caution)
                 + (0.20 * single_step_priority)
                 + (0.15 if planner_mode == "clarify_first" else 0.0)
+                - (0.15 * action_surface_scores.get("mutate_local", 0.0))
             ),
             "external": -_clamp01(
                 (0.25 * execution_caution)
-                + (0.35 * local_first_priority)
+                + (0.32 * local_first_priority)
                 + (0.30 * shared_caution)
                 + (0.15 if planner_mode == "clarify_first" else 0.0)
+                - (0.12 * action_surface_scores.get("mutate_external", 0.0))
             ),
             "retry_failed": -_clamp01(0.95 * retry_avoidance),
         }
@@ -414,19 +470,23 @@ def compile_state_plan(
     )
 
     runtime_surfaces: list[str] = []
-    if planner_mode != "direct" or tool_class_weights:
+    if planner_mode != "direct" or tool_class_weights or any(
+        value >= 0.2 for value in action_surface_scores.values()
+    ):
         runtime_surfaces.append("planner")
+        runtime_surfaces.append("action_surfaces")
     if preferred_risk_mode != "direct":
         runtime_surfaces.append("risk")
-    if response_controls:
+    if response_controls or any(value >= 0.2 for value in response_shape_scores.values()):
         runtime_surfaces.append("response")
+        runtime_surfaces.append("response_shape")
     if max_tool_calls_per_turn > 0 or max_parallel_tools > 0:
         runtime_surfaces.append("execution_budget")
 
     runtime_coverage_score = _clamp01(
-        (0.34 * max(planning_priority, float(bool(tool_class_weights))))
+        (0.30 * max(action_surface_scores.values(), default=0.0, key=float))
         + (0.28 * max(execution_mode_scores.get("inspect", 0.0), execution_mode_scores.get("confirm", 0.0), execution_mode_scores.get("clarify", 0.0)))
-        + (0.18 * max(response_directness, findings_first_priority, single_step_priority))
+        + (0.20 * max(response_shape_scores.values(), default=0.0, key=float))
         + (0.20 * max(float(bool(max_tool_calls_per_turn)), float(bool(max_parallel_tools and max_parallel_tools < 3))))
     )
 
@@ -472,12 +532,14 @@ def compile_state_plan(
         clarify_priority=clarify_priority,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
         max_parallel_tools=max_parallel_tools,
+        action_surface_scores=action_surface_scores,
         execution_mode_scores=execution_mode_scores,
         runtime_coverage_score=runtime_coverage_score,
         response_directness=response_directness,
         findings_first_priority=findings_first_priority,
         single_step_priority=single_step_priority,
         shared_channel_caution=shared_caution,
+        response_shape_scores=response_shape_scores,
         require_sequential=require_sequential,
         preferred_risk_mode=preferred_risk_mode,
         prompt_mode=prompt_mode,
@@ -502,12 +564,14 @@ def plan_summary(plan: PolicyStatePlan) -> dict[str, object]:
         "clarify_priority": round(plan.clarify_priority, 3),
         "max_tool_calls_per_turn": int(plan.max_tool_calls_per_turn),
         "max_parallel_tools": int(plan.max_parallel_tools),
+        "action_surface_scores": dict(plan.action_surface_scores),
         "execution_mode_scores": dict(plan.execution_mode_scores),
         "runtime_coverage_score": round(plan.runtime_coverage_score, 3),
         "response_directness": round(plan.response_directness, 3),
         "findings_first_priority": round(plan.findings_first_priority, 3),
         "single_step_priority": round(plan.single_step_priority, 3),
         "shared_channel_caution": round(plan.shared_channel_caution, 3),
+        "response_shape_scores": dict(plan.response_shape_scores),
         "require_sequential": bool(plan.require_sequential),
         "preferred_risk_mode": plan.preferred_risk_mode,
         "prompt_mode": plan.prompt_mode,

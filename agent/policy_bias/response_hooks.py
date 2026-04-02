@@ -60,6 +60,27 @@ def derive_response_controls(
 ) -> dict[str, object]:
     if policy_state_plan is not None and policy_state_plan.response_controls:
         return dict(policy_state_plan.response_controls)
+    if policy_state_plan is not None and policy_state_plan.response_shape_scores:
+        controls: dict[str, object] = {}
+        concise = float(policy_state_plan.response_shape_scores.get("concise", 0.0))
+        findings_first = max(
+            float(policy_state_plan.response_shape_scores.get("findings_first", 0.0)),
+            float(policy_state_plan.response_shape_scores.get("structured_debug", 0.0)),
+        )
+        single_step = float(policy_state_plan.response_shape_scores.get("single_step", 0.0))
+        if concise >= 0.35:
+            controls["strip_leading_acknowledgement"] = True
+            controls["drop_trailing_offer"] = True
+        if findings_first >= 0.35 and _looks_debug_request(
+            user_message=user_message,
+            task_type=task_type,
+        ):
+            controls["findings_first_heading"] = True
+        if single_step >= 0.35:
+            controls["prefer_single_step"] = True
+            controls["max_numbered_steps"] = 1
+        if controls:
+            return controls
 
     keys = {
         bias.bias_candidate_key or ""
