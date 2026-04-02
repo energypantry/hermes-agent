@@ -29,10 +29,19 @@ def _mock_response(content: str = "done"):
     return SimpleNamespace(choices=[choice], model="test/model", usage=None)
 
 
+def _tool_call(name: str, arguments: str = "{}"):
+    return SimpleNamespace(
+        id=f"call_{name}",
+        type="function",
+        function=SimpleNamespace(name=name, arguments=arguments),
+    )
+
+
 class _StubPolicyBiasEngine:
     def __init__(self, context: BiasDecisionContext):
         self.context = context
         self.turn_outcomes: list[dict] = []
+        self.recorded_planner_effects: list[dict] = []
 
     def is_enabled(self) -> bool:
         return True
@@ -54,6 +63,9 @@ class _StubPolicyBiasEngine:
 
     def rerank_tool_calls(self, context, parsed_calls):
         return parsed_calls, []
+
+    def record_planner_effects(self, context, planner_effects) -> None:
+        self.recorded_planner_effects.extend(planner_effects)
 
 
 def test_run_conversation_injects_decision_priors_and_ranked_tools():
@@ -224,6 +236,84 @@ def test_policy_state_plan_forces_sequential_tool_batches():
     ]
 
     assert agent._policy_requires_sequential_tool_batch(tool_calls) is True
+
+
+def test_policy_state_plan_limits_tool_batch_before_execution():
+    with (
+        patch(
+            "run_agent.get_tool_definitions",
+            return_value=_make_tool_defs("clarify", "patch", "send_message"),
+        ),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    context = BiasDecisionContext(
+        session_id="session-1",
+        turn_index=1,
+        task_type="repo_modification",
+        platform="slack",
+        user_message="Maybe send the update after you inspect the regression.",
+        metadata={
+            "_policy_state_plan": SimpleNamespace(max_tool_calls_per_turn=1),
+        },
+    )
+    stub_engine = _StubPolicyBiasEngine(context)
+    agent._policy_turn_context = context
+    agent._policy_bias_engine = stub_engine
+
+    tool_calls = [
+        _tool_call("clarify"),
+        _tool_call("patch"),
+        _tool_call("send_message"),
+    ]
+
+    limited = agent._policy_limit_tool_batch(tool_calls)
+
+    assert [tool.function.name for tool in limited] == ["clarify"]
+    assert stub_engine.recorded_planner_effects
+    assert stub_engine.recorded_planner_effects[0]["kind"] == "tool_batch_limit"
+    assert stub_engine.recorded_planner_effects[0]["omitted_tool_names"] == ["patch", "send_message"]
+
+
+def test_policy_state_plan_caps_parallel_workers():
+    with (
+        patch(
+            "run_agent.get_tool_definitions",
+            return_value=_make_tool_defs("read_file", "search_files", "web_search"),
+        ),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    agent._policy_turn_context = BiasDecisionContext(
+        session_id="session-1",
+        turn_index=1,
+        task_type="repo_modification",
+        platform="cli",
+        user_message="Inspect this issue.",
+        metadata={
+            "_policy_state_plan": SimpleNamespace(max_parallel_tools=2),
+        },
+    )
+
+    limit = agent._policy_parallel_tool_worker_limit(
+        [_tool_call("read_file"), _tool_call("search_files"), _tool_call("web_search")]
+    )
+
+    assert limit == 2
 
 
 def test_policy_response_controls_strip_fluff_and_add_findings_heading():

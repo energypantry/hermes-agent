@@ -245,6 +245,8 @@ class PolicyStatePlan:
     retry_avoidance: float = 0.0
     planner_mode: str = "direct"
     clarify_priority: float = 0.0
+    max_tool_calls_per_turn: int = 0
+    max_parallel_tools: int = 0
     response_directness: float = 0.0
     findings_first_priority: float = 0.0
     single_step_priority: float = 0.0
@@ -253,6 +255,7 @@ class PolicyStatePlan:
     preferred_risk_mode: str = "direct"
     prompt_mode: str = "minimal"
     available_tools: list[str] = field(default_factory=list)
+    runtime_surfaces: list[str] = field(default_factory=list)
     prompt_hint_keys: list[str] = field(default_factory=list)
     tool_class_weights: dict[str, float] = field(default_factory=dict)
     response_controls: dict[str, Any] = field(default_factory=dict)

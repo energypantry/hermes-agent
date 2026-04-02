@@ -5608,12 +5608,6 @@ class AIAgent:
         independent: read-only tools may always share the parallel path, while
         file reads/writes may do so only when their target paths do not overlap.
         """
-        reorder_fn = getattr(type(self), "_policy_reorder_tool_calls", None)
-        if callable(reorder_fn):
-            reordered_tool_calls = reorder_fn(self, assistant_message.tool_calls)
-        else:
-            reordered_tool_calls = list(assistant_message.tool_calls or [])
-        assistant_message.tool_calls = reordered_tool_calls
         tool_calls = assistant_message.tool_calls
 
         # Allow _vprint during tool execution even with stream consumers
@@ -5703,6 +5697,11 @@ class AIAgent:
         """Store the current tool surface as the baseline for per-turn weighting."""
         self._base_tools = copy.deepcopy(self.tools or [])
 
+    def _policy_prepare_tool_calls(self, tool_calls) -> list:
+        """Apply policy-driven ordering and action-budget limits before persistence."""
+        prepared = self._policy_reorder_tool_calls(tool_calls)
+        return self._policy_limit_tool_batch(prepared)
+
     def _policy_reorder_tool_calls(self, tool_calls) -> list:
         """Reorder tool calls using policy-bias planner hooks when enabled."""
         if not tool_calls or not getattr(self, "_policy_turn_context", None):
@@ -5726,6 +5725,54 @@ class AIAgent:
             parsed_calls,
         )
         return [tool_call for tool_call, _name, _args in ordered]
+
+    def _policy_limit_tool_batch(self, tool_calls) -> list:
+        """Trim overly broad tool batches using policy-state execution budgets."""
+        calls = list(tool_calls or [])
+        if not calls:
+            return calls
+        ctx = getattr(self, "_policy_turn_context", None)
+        if not ctx:
+            return calls
+
+        state_plan = ctx.metadata.get("_policy_state_plan")
+        limit = int(getattr(state_plan, "max_tool_calls_per_turn", 0) or 0)
+        if limit <= 0 or len(calls) <= limit:
+            return calls
+
+        kept = calls[:limit]
+        omitted = calls[limit:]
+        effect = {
+            "kind": "tool_batch_limit",
+            "limit": limit,
+            "original_count": len(calls),
+            "kept_tool_names": [tc.function.name for tc in kept],
+            "omitted_tool_names": [tc.function.name for tc in omitted],
+        }
+        engine = getattr(self, "_policy_bias_engine", None)
+        if engine and engine.is_enabled():
+            try:
+                engine.record_planner_effects(ctx, [effect])
+            except Exception as exc:
+                logger.debug("Policy bias planner trace update failed: %s", exc)
+        else:
+            ctx.metadata.setdefault("planner_effects", []).append(effect)
+        return kept
+
+    def _policy_parallel_tool_worker_limit(self, tool_calls) -> int | None:
+        """Return the policy-driven parallel worker cap for this tool batch."""
+        calls = list(tool_calls or [])
+        if not calls:
+            return None
+        ctx = getattr(self, "_policy_turn_context", None)
+        if not ctx:
+            return None
+
+        state_plan = ctx.metadata.get("_policy_state_plan")
+        limit = int(getattr(state_plan, "max_parallel_tools", 0) or 0)
+        if limit <= 0:
+            return None
+        return max(1, min(limit, len(calls)))
 
     def _policy_requires_sequential_tool_batch(self, tool_calls) -> bool:
         """Force sequential execution when inspect-first biases conflict with parallelism."""
@@ -5940,7 +5987,12 @@ class AIAgent:
             spinner.start()
 
         try:
-            max_workers = min(num_tools, _MAX_TOOL_WORKERS)
+            policy_worker_limit = self._policy_parallel_tool_worker_limit(tool_calls)
+            max_workers = min(
+                num_tools,
+                _MAX_TOOL_WORKERS,
+                policy_worker_limit or _MAX_TOOL_WORKERS,
+            )
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
                 for i, (tc, name, args) in enumerate(parsed_calls):
@@ -8355,6 +8407,12 @@ class AIAgent:
                     assistant_message.tool_calls = self._deduplicate_tool_calls(
                         assistant_message.tool_calls
                     )
+                    prepare_tool_calls_fn = getattr(type(self), "_policy_prepare_tool_calls", None)
+                    if callable(prepare_tool_calls_fn):
+                        assistant_message.tool_calls = prepare_tool_calls_fn(
+                            self,
+                            assistant_message.tool_calls,
+                        )
 
                     assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
                     

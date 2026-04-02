@@ -11,11 +11,13 @@ Implemented a first-class Policy Bias Engine with:
 - planner/tool weighting hooks
 - risk gating for external and mutating actions, including inspect / simulate / confirm decisions
 - deterministic response-policy hooks for concise/direct and findings-first behavior, with traceable response effects
+- policy-driven tool-batch preparation so reordered and limited tool calls are persisted consistently before execution
 - explainability traces
 - governance controls for enable, disable, archive, history, rollback, rebuild, and export
 - boundary metadata and audit tooling to keep policy bias separate from memory and skills
 - a V2 policy-state foundation with persistent dimensions, update history, compiler-oriented arbitration, and runtime consumption
 - a V2.1 compiler surface with explicit `planner_mode`, `clarify_priority`, `tool_class_weights`, response budgets, and conflict-resolution metadata
+- a V2.2 runtime substrate with action-budget controls (`max_tool_calls_per_turn`, `max_parallel_tools`) and stronger state-prompt suppression when runtime coverage is already high
 - a `policy-bias state ...` CLI subtree backed by the policy-state store for inspection, rebuild, reset, and explain flows
 
 The engine is integrated into the live Hermes conversation loop in `run_agent.py`, not just a standalone prototype module.
@@ -49,10 +51,17 @@ The engine is integrated into the live Hermes conversation loop in `run_agent.py
 
 ## Files Modified
 
+- `agent/policy_bias/models.py`
+- `agent/policy_bias/engine.py`
+- `agent/policy_bias/state_runtime.py`
+- `agent/policy_bias/planner_hooks.py`
+- `agent/policy_bias/response_hooks.py`
 - `run_agent.py`
 - `hermes_cli/config.py`
 - `hermes_cli/main.py`
 - `tests/tools/test_browser_camofox_state.py`
+- `tests/agent/test_policy_bias_engine.py`
+- `tests/test_run_agent_policy_bias.py`
 - `hermes_cli/policy_bias_cmd.py`
 - `docs/policy-bias.md`
 - `docs/policy-bias-ops.md`
@@ -90,6 +99,7 @@ Added tests for:
 - planner reranking and risk gating
 - staged risk decisions for inspect / simulate / confirm
 - deterministic response-policy controls and trace recording
+- policy-state action-budget limits for tool batch breadth, worker caps, and state-only runtime coverage
 - repeated-success promotion into active bias
 - disabling a bias and verifying influence stops
 - shadow bias observability without behavior impact
@@ -107,14 +117,14 @@ Verification completed in this environment:
   - `tests/agent/test_policy_bias_engine.py`
   - `tests/hermes_cli/test_policy_bias_cmd.py`
   - `tests/test_run_agent_policy_bias.py`
-- current focused result after policy-state compiler and arbitration validation: `38 passed`
+- current focused result after policy-state compiler, arbitration, and action-budget validation: `45 passed`
 - full project `pytest` was executed in a provisioned local virtualenv and produced:
-  - `7550 passed`
+  - `7610 passed`
   - `220 skipped`
   - `1 xpassed`
-  - `21 failed`
+  - `50 failed`
 
-The remaining 21 full-suite failures were reproduced on the baseline `main` commit as well, so they are not regressions introduced by the Policy Bias Engine branch.
+The remaining full-suite failures in this environment are concentrated outside the policy-bias focused surfaces and still require separate mainline cleanup.
 
 ## Known Limitations
 

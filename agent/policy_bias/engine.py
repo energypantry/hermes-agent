@@ -256,6 +256,16 @@ class PolicyBiasEngine:
             self._save_trace_update(context)
         return ordered, planner_effects
 
+    def record_planner_effects(
+        self,
+        context: Optional[BiasDecisionContext],
+        planner_effects: list[dict[str, object]],
+    ) -> None:
+        if context is None or not self.is_enabled() or not planner_effects:
+            return
+        context.metadata.setdefault("planner_effects", []).extend(planner_effects)
+        self._save_trace_update(context)
+
     def evaluate_risk(
         self,
         context: Optional[BiasDecisionContext],

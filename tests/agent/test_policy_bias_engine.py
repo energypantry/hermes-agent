@@ -553,13 +553,14 @@ def test_policy_state_plan_compiles_arbitration_and_minimal_prompt_hints():
     assert plan.planner_mode == "inspect_first"
     assert plan.require_sequential is True
     assert plan.preferred_risk_mode == "confirm"
-    assert plan.prompt_mode == "minimal"
+    assert plan.prompt_mode == "off"
+    assert plan.max_tool_calls_per_turn == 1
+    assert plan.max_parallel_tools == 1
+    assert "execution_budget" in plan.runtime_surfaces
     assert plan.tool_class_weights["inspect"] > 0.8
     assert len(plan.prompt_hint_keys) <= 3
     assert "risk_aversion" in plan.prompt_hint_keys
-    assert priors.startswith("Decision Priors")
-    assert "state=risk_aversion" in priors
-    assert "state=local_first_tendency" in priors
+    assert priors == ""
 
 
 def test_policy_state_plan_arbitrates_clarify_first_and_conflicts():
@@ -583,6 +584,9 @@ def test_policy_state_plan_arbitrates_clarify_first_and_conflicts():
     assert plan.planner_mode == "clarify_first"
     assert plan.clarify_priority >= 0.45
     assert plan.require_sequential is True
+    assert plan.max_tool_calls_per_turn == 1
+    assert plan.max_parallel_tools == 1
+    assert plan.prompt_mode == "off"
     assert plan.tool_class_weights["clarify"] > 0.55
     assert plan.response_controls["findings_first_heading"] is True
     assert plan.response_controls["max_numbered_steps"] == 1
@@ -611,6 +615,7 @@ def test_policy_state_plan_summary_is_emitted_for_explainability():
     assert summary["findings_first_priority"] > 0
     assert "planner_mode" in summary
     assert "tool_class_weights" in summary
+    assert "runtime_surfaces" in summary
     assert isinstance(summary["arbitration_notes"], list)
 
 
@@ -786,6 +791,27 @@ def test_policy_state_response_budget_limits_numbered_steps():
     assert any(effect["effect"] == "limit_numbered_steps" for effect in effects)
 
 
+def test_policy_state_plan_limits_parallelism_before_mutation():
+    policy_state = [
+        _make_state_dimension("profile:test", "decomposition_tendency", value=0.82),
+        _make_state_dimension("profile:test", "inspect_tendency", value=0.74),
+        _make_state_dimension("profile:test", "retry_switch_tendency", value=0.76),
+    ]
+
+    plan = compile_state_plan(
+        policy_state,
+        task_type="repo_modification",
+        platform="cli",
+        user_message="Inspect this regression and fix it carefully.",
+        available_tools=["todo", "read_file", "patch", "terminal"],
+        recent_failed_tools=["patch"],
+    )
+
+    assert plan.max_tool_calls_per_turn == 2
+    assert plan.max_parallel_tools == 1
+    assert "execution_budget" in plan.runtime_surfaces
+
+
 def test_policy_state_local_weight_stays_off_for_non_repo_tasks():
     policy_state = [
         _make_state_dimension("profile:test", "local_first_tendency", value=0.95),
@@ -855,13 +881,14 @@ def test_policy_state_influences_begin_turn_without_v1_bias_objects(tmp_path):
         )
 
         assert ctx.active_biases == []
-        assert ctx.decision_priors.startswith("Decision Priors")
-        assert "state=inspect_tendency" in ctx.decision_priors
+        assert ctx.decision_priors == ""
         assert ctx.ranked_tools[0]["function"]["name"] == "read_file"
         assert ctx.metadata["response_controls"]["strip_leading_acknowledgement"] is True
         assert ctx.metadata["response_controls"]["findings_first_heading"] is True
         assert ctx.metadata["policy_state_dimensions"]
         assert ctx.metadata["policy_state_plan"]["kind"] == "policy_state_plan"
+        assert ctx.metadata["policy_state_plan"]["prompt_mode"] == "off"
+        assert "response" in ctx.metadata["policy_state_plan"]["runtime_surfaces"]
     finally:
         engine.close()
 

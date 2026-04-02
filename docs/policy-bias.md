@@ -102,6 +102,7 @@ With V2 policy state, the same surfaces are first fed by a compiled state plan:
 - state dimensions can raise or lower tool weights even when no named bias exists yet
 - arbitration can suppress low-confidence signals before they become prompt text
 - prompt translation is used only when the runtime still needs a compact hint for the model
+- action budgets can cap how many tool calls Hermes executes before the next model turn, plus how many of those calls may run in parallel
 
 Hermes now also applies deterministic response controls for relevant active biases:
 
@@ -140,7 +141,7 @@ The engine is wired into the real Hermes flow in `run_agent.py`:
 - each `run_conversation()` turn calls `begin_turn()`
 - the per-call system prompt gets a `Decision Priors` block
 - tool definitions are re-ranked before the API call
-- tool batches are reordered when inspect-first policies apply
+- tool batches are reordered and, when needed, narrowed before the assistant message is persisted
 - risk gating runs before tool execution
 - risk gating can return inspect / simulate / confirm decisions with suggested next steps
 - final responses can be post-processed by deterministic response-policy hooks when active biases require concise/direct or findings-first behavior

@@ -309,6 +309,25 @@ def compile_state_plan(
         require_sequential = True
         notes.append("Inspect-first arbitration serializes mixed inspect and execute batches.")
 
+    max_tool_calls_per_turn = 0
+    max_parallel_tools = 0
+    if planner_mode == "clarify_first":
+        max_tool_calls_per_turn = 1
+        max_parallel_tools = 1
+        notes.append("Clarify-first arbitration caps the turn to one tool decision at a time.")
+    elif single_step_priority >= 0.55 or execution_caution >= 0.82:
+        max_tool_calls_per_turn = 1
+        max_parallel_tools = 1
+        notes.append("High caution or one-step preference caps execution to a single tool call.")
+    elif require_sequential:
+        max_tool_calls_per_turn = 2 if planning_priority >= 0.55 else 1
+        max_parallel_tools = 1
+        notes.append("Sequential arbitration constrains the tool batch before the next model turn.")
+    elif planning_priority >= 0.60 or retry_avoidance >= 0.45:
+        max_tool_calls_per_turn = 2
+        max_parallel_tools = 2
+        notes.append("Planner pressure reduces tool-batch breadth even when parallelism stays available.")
+
     response_controls: dict[str, object] = {}
     if response_directness >= 0.35:
         response_controls["strip_leading_acknowledgement"] = True
@@ -355,6 +374,16 @@ def compile_state_plan(
         }
     )
 
+    runtime_surfaces: list[str] = []
+    if planner_mode != "direct" or tool_class_weights:
+        runtime_surfaces.append("planner")
+    if preferred_risk_mode != "direct":
+        runtime_surfaces.append("risk")
+    if response_controls:
+        runtime_surfaces.append("response")
+    if max_tool_calls_per_turn > 0 or max_parallel_tools > 0:
+        runtime_surfaces.append("execution_budget")
+
     prompt_hint_keys: list[str] = []
     if execution_caution >= 0.72:
         prompt_hint_keys.append("risk_aversion")
@@ -371,9 +400,14 @@ def compile_state_plan(
     prompt_hint_keys = list(dict.fromkeys(prompt_hint_keys))[:3]
 
     prompt_mode = "off"
-    if prompt_hint_keys:
+    if prompt_hint_keys and not (
+        len(runtime_surfaces) >= 3
+        and (planner_mode != "direct" or preferred_risk_mode != "direct")
+    ):
         prompt_mode = "minimal"
         notes.append("Prompt translation is reduced to only the highest-signal state hints.")
+    elif prompt_hint_keys:
+        notes.append("Runtime coverage is strong enough to suppress state prompt translation for this turn.")
 
     return PolicyStatePlan(
         active_dimensions=active,
@@ -384,6 +418,8 @@ def compile_state_plan(
         retry_avoidance=retry_avoidance,
         planner_mode=planner_mode,
         clarify_priority=clarify_priority,
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
+        max_parallel_tools=max_parallel_tools,
         response_directness=response_directness,
         findings_first_priority=findings_first_priority,
         single_step_priority=single_step_priority,
@@ -392,6 +428,7 @@ def compile_state_plan(
         preferred_risk_mode=preferred_risk_mode,
         prompt_mode=prompt_mode,
         available_tools=sorted(available),
+        runtime_surfaces=runtime_surfaces,
         prompt_hint_keys=prompt_hint_keys,
         tool_class_weights=tool_class_weights,
         response_controls=response_controls,
@@ -409,6 +446,8 @@ def plan_summary(plan: PolicyStatePlan) -> dict[str, object]:
         "retry_avoidance": round(plan.retry_avoidance, 3),
         "planner_mode": plan.planner_mode,
         "clarify_priority": round(plan.clarify_priority, 3),
+        "max_tool_calls_per_turn": int(plan.max_tool_calls_per_turn),
+        "max_parallel_tools": int(plan.max_parallel_tools),
         "response_directness": round(plan.response_directness, 3),
         "findings_first_priority": round(plan.findings_first_priority, 3),
         "single_step_priority": round(plan.single_step_priority, 3),
@@ -416,6 +455,7 @@ def plan_summary(plan: PolicyStatePlan) -> dict[str, object]:
         "require_sequential": bool(plan.require_sequential),
         "preferred_risk_mode": plan.preferred_risk_mode,
         "prompt_mode": plan.prompt_mode,
+        "runtime_surfaces": list(plan.runtime_surfaces),
         "tool_class_weights": dict(plan.tool_class_weights),
         "prompt_hint_keys": list(plan.prompt_hint_keys),
         "conflict_resolutions": list(plan.conflict_resolutions),

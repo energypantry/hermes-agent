@@ -121,6 +121,24 @@ Examples:
 - findings-first and one-step-at-a-time can co-exist by preserving findings structure while capping numbered next steps to one
 - local-first and inspect-first should strengthen local inspection weights without depending on prompt text
 
+### 2.7 V2.2 Action Budget and Runtime Coverage
+
+The next upgrade is to let the compiler control action amplitude, not just action ordering.
+
+The compiler should now also emit:
+
+- `max_tool_calls_per_turn`
+- `max_parallel_tools`
+- `runtime_surfaces`
+
+Examples:
+
+- clarify-first or high-caution turns should cap execution to one tool decision before the next model turn
+- inspect-first / decomposition-heavy turns can still allow two tools, but should constrain them to sequential execution
+- when planner, risk, response, and execution-budget surfaces are already covered by the runtime, prompt translation for policy state should switch fully off
+
+This makes policy state feel less like prompt text and more like a low-bandwidth behavioral substrate that governs how much the agent acts before re-evaluating.
+
 ## Proposed Architecture
 
 ### 1. Moment Layer
