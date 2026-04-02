@@ -453,6 +453,34 @@ DEFAULT_CONFIG = {
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
     },
 
+    "policy_bias": {
+        "enabled": True,
+        "retrieval_top_k": 4,
+        "max_prompt_tokens": 500,
+        "shadow_mode_default": False,
+        "synthesis": {
+            "min_support_count": 3,
+            "min_avg_reward": 0.25,
+            "strong_signal_reward": 0.8,
+            "confidence_decay_per_day": 0.01,
+        },
+        "scopes_enabled": [
+            "planning",
+            "tool_use",
+            "risk",
+            "communication",
+            "user_specific",
+        ],
+        "risk_controls": {
+            "require_inspect_before_execute_for_external_actions": True,
+            "high_side_effect_shadow_only": False,
+        },
+        "observability": {
+            "log_bias_triggers": True,
+            "expose_explanations": True,
+        },
+    },
+
     # Honcho AI-native memory -- reads ~/.honcho/config.json as single source of truth.
     # This section is only needed for hermes-specific overrides; everything else
     # (apiKey, workspace, peerName, sessions, enabled) comes from the global config.
@@ -517,7 +545,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 11,
+    "_config_version": 12,
 }
 
 # =============================================================================
