@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 
+from agent.policy_bias.bias_store import BiasStore
 from agent.policy_bias.engine import PolicyBiasEngine
 from agent.policy_bias.governance import audit_bias_boundaries, inspect_bias, rebuild_biases
 from agent.policy_bias.injector import build_decision_priors
@@ -28,6 +30,7 @@ from agent.policy_bias.synthesis import (
     get_candidate_descriptor,
     synthesize_bias,
 )
+from hermes_constants import get_hermes_home
 
 
 def _tool_defs(*names: str) -> list[dict]:
@@ -242,6 +245,73 @@ def test_store_migrates_v1_schema_to_current(tmp_path):
         assert "response_effects" in trace_columns
         assert "policy_state_dimensions" in tables
         assert "policy_state_updates" in tables
+    finally:
+        store.close()
+
+
+def test_minimal_bias_store_seeds_requested_default_biases(tmp_path):
+    store = PolicyBiasStore(db_path=tmp_path / "policy_bias.db")
+    try:
+        simple_store = BiasStore(policy_store=store)
+        seeded = simple_store.ensure_seed_biases(profile_id="profile:test")
+        bias_ids = {bias.id for bias in seeded}
+        relevant = simple_store.get_relevant_biases(
+            "Please fix the bug in app.py",
+            profile_id="profile:test",
+            available_tools=["patch", "read_file", "search_files"],
+            top_k=3,
+        )
+        relevant_ids = {bias.id for bias in relevant}
+
+        assert bias_ids == {
+            "inspect-before-modify",
+            "avoid-repeating-failed-tool-actions",
+            "search-before-answer",
+        }
+        assert "inspect-before-modify" in relevant_ids
+    finally:
+        store.close()
+
+
+def test_record_turn_outcome_appends_simple_moment_log(tmp_path):
+    engine, store = _make_engine(tmp_path)
+    try:
+        ctx = engine.begin_turn(
+            session_id="session-1",
+            turn_index=1,
+            user_message="Fix app.py",
+            platform="cli",
+            available_tools=["read_file", "patch"],
+            tool_defs=_tool_defs("read_file", "patch"),
+        )
+        engine.record_tool_result(
+            ctx,
+            tool_name="read_file",
+            function_args={"path": "app.py"},
+            result='{"success": true}',
+            duration_ms=5,
+        )
+        engine.record_tool_result(
+            ctx,
+            tool_name="patch",
+            function_args={"path": "app.py"},
+            result='{"success": true}',
+            duration_ms=5,
+        )
+        engine.record_turn_outcome(
+            ctx,
+            final_response="done",
+            completed=True,
+            interrupted=False,
+        )
+
+        moment_log_path = get_hermes_home() / "moment_log.json"
+        payload = json.loads(moment_log_path.read_text(encoding="utf-8"))
+
+        assert moment_log_path.exists()
+        assert payload[-1]["context"] == "Fix app.py"
+        assert payload[-1]["action"] == "read_file > patch"
+        assert payload[-1]["success"] is True
     finally:
         store.close()
 
@@ -959,8 +1029,11 @@ def test_policy_state_influences_begin_turn_without_v1_bias_objects(tmp_path):
             tool_defs=_tool_defs("patch", "read_file"),
         )
 
-        assert ctx.active_biases == []
-        assert ctx.decision_priors == ""
+        assert {bias.bias_candidate_key for bias in ctx.active_biases} >= {
+            "planning.inspect_before_edit",
+            "tool_use.change_strategy_after_retries",
+        }
+        assert "Decision Priors" in ctx.decision_priors
         assert ctx.ranked_tools[0]["function"]["name"] == "read_file"
         assert ctx.metadata["response_controls"]["strip_leading_acknowledgement"] is True
         assert ctx.metadata["response_controls"]["findings_first_heading"] is True
@@ -1047,7 +1120,10 @@ def test_disabling_bias_stops_influencing_behavior(tmp_path):
             function_args={"message": "hello"},
         )
 
-        assert not ctx.active_biases
+        assert all(
+            (active.bias_candidate_key or "") != "risk.inspect_before_execute"
+            for active in ctx.active_biases
+        )
         assert unblocked is None
     finally:
         engine.close()
@@ -1155,9 +1231,12 @@ def test_shadow_bias_is_logged_but_does_not_change_behavior(tmp_path, caplog):
                 tool_defs=_tool_defs("send_message", "web_search"),
             )
 
-        assert not ctx.active_biases
+        assert all(
+            (active.bias_candidate_key or "") != "risk.inspect_before_execute"
+            for active in ctx.active_biases
+        )
         assert [shadow.id for shadow in ctx.shadow_biases] == [bias.id]
-        assert ctx.decision_priors == ""
+        assert "Decision Priors" in ctx.decision_priors
         assert [tool["function"]["name"] for tool in ctx.ranked_tools] == [
             "send_message",
             "web_search",
@@ -1166,7 +1245,7 @@ def test_shadow_bias_is_logged_but_does_not_change_behavior(tmp_path, caplog):
 
         trace = store.get_recent_decision_traces(engine.profile_id, limit=1)[0]
         assert trace.shadow_bias_ids == [bias.id]
-        assert trace.injected_bias_ids == []
+        assert bias.id not in trace.injected_bias_ids
     finally:
         engine.close()
 

@@ -7,6 +7,11 @@ import json
 import logging
 from typing import Iterable, Optional
 
+from hermes_constants import get_hermes_home
+from utils import atomic_json_write
+
+from .bias_retriever import BiasRetriever
+from .bias_store import BiasStore
 from .explain import bias_summary
 from .governance import explain_recent
 from .injector import build_decision_priors
@@ -71,8 +76,18 @@ class PolicyBiasEngine:
                 logger.warning("Policy bias store init failed; feature disabled: %s", exc)
                 self.enabled = False
         self._seen_feedback_fingerprints: set[str] = set()
+        self._compat_bias_store = BiasStore(policy_store=self.store) if self.store else None
+        self._compat_bias_retriever = (
+            BiasRetriever(self._compat_bias_store) if self._compat_bias_store else None
+        )
+        self._last_bias_log_fingerprint: tuple[object, ...] | None = None
 
     def close(self) -> None:
+        if self._compat_bias_store:
+            try:
+                self._compat_bias_store.close()
+            except Exception:
+                pass
         if self.store:
             try:
                 self.store.close()
@@ -102,6 +117,7 @@ class PolicyBiasEngine:
                 ranked_tools=tool_defs,
             )
 
+        self._ensure_seed_biases()
         self._capture_feedback_preferences(
             session_id=session_id,
             user_message=user_message,
@@ -116,10 +132,18 @@ class PolicyBiasEngine:
             limit=20,
             session_id=session_id,
         )
+        recent_failed_signatures = [
+            moment.tool_path
+            for moment in recent_moments
+            if moment.decision_class == "tool_use"
+            and moment.outcome_class in {"failure", "error", "blocked"}
+            and moment.tool_path
+        ]
         recent_failed_tools = [
             self._extract_terminal_tool_name(moment.tool_path)
             for moment in recent_moments
-            if moment.outcome_class in {"failure", "error", "blocked"}
+            if moment.decision_class == "tool_use"
+            and moment.outcome_class in {"failure", "error", "blocked"}
         ]
         has_recent_inspection = any(
             self._extract_terminal_tool_name(moment.tool_path) in _INSPECT_TOOLS
@@ -152,6 +176,12 @@ class PolicyBiasEngine:
             policy_state=state_dimensions,
             policy_state_plan=state_plan,
         )
+        compat_biases = self._get_compat_biases(
+            user_message=user_message,
+            task_type=task_type,
+            platform=platform or "cli",
+            available_tools=available_tools,
+        )
         ranked_tools, tool_deltas, planner_effects = rerank_tools(
             tool_defs,
             retrieval.active_biases,
@@ -165,6 +195,12 @@ class PolicyBiasEngine:
         evidence_items = [bias_summary(bias) for bias in retrieval.active_biases]
         evidence_items.extend(state_evidence_summary(state_dimensions))
         evidence_items.append(plan_summary(state_plan))
+        self._log_bias_usage(
+            session_id=session_id,
+            turn_index=turn_index,
+            active_biases=compat_biases,
+            injected_bias_ids=injected_ids,
+        )
         trace = DecisionTrace(
             id=new_id("trace"),
             profile_id=self.profile_id,
@@ -215,6 +251,7 @@ class PolicyBiasEngine:
             trace_id=trace.id,
             metadata={
                 "recent_failed_tools": [name for name in recent_failed_tools if name],
+                "recent_failed_signatures": recent_failed_signatures,
                 "has_recent_inspection": has_recent_inspection,
                 "planner_effects": planner_effects,
                 "turn_tool_names": [],
@@ -253,6 +290,10 @@ class PolicyBiasEngine:
         )
         if planner_effects:
             context.metadata.setdefault("planner_effects", []).extend(planner_effects)
+            logger.info(
+                "[BIAS] Changed behavior: reordered tool calls to %s",
+                [name for _tool_call, name, _args in ordered],
+            )
             self._save_trace_update(context)
         return ordered, planner_effects
 
@@ -281,6 +322,7 @@ class PolicyBiasEngine:
             context.active_biases,
             require_inspect_first=self.config.require_inspect_before_execute_for_external_actions,
             has_recent_inspection=bool(context.metadata.get("has_recent_inspection")),
+            recent_failed_signatures=context.metadata.get("recent_failed_signatures", []),
             user_message=context.user_message,
             platform=context.platform,
             policy_state=context.metadata.get("_policy_state_dimensions", []),
@@ -297,6 +339,11 @@ class PolicyBiasEngine:
                 }
             )
             context.metadata.setdefault("blocked_tool_names", []).append(tool_name)
+            logger.info(
+                "[BIAS] Changed behavior: blocked %s via %s",
+                tool_name,
+                risk_action.decision,
+            )
             self._save_trace_update(context)
         return risk_action
 
@@ -334,8 +381,10 @@ class PolicyBiasEngine:
 
         candidate_key = None
         repeated_failures = context.metadata.setdefault("tool_failures", {})
+        tool_path = self._build_tool_path(tool_name, function_args)
         if failure:
             repeated_failures[tool_name] = repeated_failures.get(tool_name, 0) + 1
+            context.metadata.setdefault("recent_failed_signatures", []).append(tool_path)
             if repeated_failures[tool_name] >= 2:
                 candidate_key = "tool_use.change_strategy_after_retries"
 
@@ -348,7 +397,7 @@ class PolicyBiasEngine:
             platform=context.platform,
             context_summary=(context.user_message or "")[:220],
             action_trace_summary=f"{tool_name} completed with {'failure' if failure else 'success'}",
-            tool_path=tool_name,
+            tool_path=tool_path,
             decision_class="tool_use",
             outcome_class=outcome_class,
             reward_score=reward,
@@ -463,6 +512,11 @@ class PolicyBiasEngine:
             )
             self._record_moment(candidate_moment)
             self._synthesize_candidate(candidate_key)
+        self._append_moment_log(
+            context=context,
+            action=" > ".join(tool_names) if tool_names else "no_tools",
+            success=completed and not interrupted,
+        )
 
     def recent_explanations(
         self,
@@ -845,9 +899,108 @@ class PolicyBiasEngine:
             return ""
         if ">" in tool_path:
             return tool_path.split(">")[-1].strip()
+        if "::" in tool_path:
+            return tool_path.split("::", 1)[0].strip()
         return tool_path.strip()
 
     @staticmethod
     def _looks_shared_platform(platform: str) -> bool:
         platform = (platform or "").lower()
         return any(token in platform for token in ("slack", "discord", "teams", "group", "channel"))
+
+    def _ensure_seed_biases(self) -> None:
+        if not self._compat_bias_store:
+            return
+        seeded = self._compat_bias_store.ensure_seed_biases(profile_id=self.profile_id)
+        for bias in seeded:
+            logger.info("[BIAS] Seeded: %s", bias.id)
+
+    def _get_compat_biases(
+        self,
+        *,
+        user_message: str,
+        task_type: str,
+        platform: str,
+        available_tools: Iterable[str],
+    ) -> list[object]:
+        if not self._compat_bias_retriever:
+            return []
+        return self._compat_bias_retriever.get_relevant_biases(
+            user_message,
+            profile_id=self.profile_id,
+            task_type=task_type,
+            platform=platform,
+            available_tools=available_tools,
+            top_k=3,
+        )
+
+    def _log_bias_usage(
+        self,
+        *,
+        session_id: str,
+        turn_index: int,
+        active_biases: list[object],
+        injected_bias_ids: list[str],
+    ) -> None:
+        bias_ids = tuple(getattr(bias, "id", "") for bias in active_biases)
+        fingerprint = (session_id, turn_index, bias_ids, tuple(injected_bias_ids))
+        if fingerprint == self._last_bias_log_fingerprint:
+            return
+        self._last_bias_log_fingerprint = fingerprint
+        for bias in active_biases:
+            logger.info("[BIAS] Applied: %s", getattr(bias, "id", "unknown-bias"))
+        if injected_bias_ids:
+            logger.info("[BIAS] Injected %s prior(s) into prompt", len(injected_bias_ids))
+
+    def _append_moment_log(
+        self,
+        *,
+        context: BiasDecisionContext,
+        action: str,
+        success: bool,
+    ) -> None:
+        log_path = get_hermes_home() / "moment_log.json"
+        entries = []
+        if log_path.exists():
+            try:
+                loaded = json.loads(log_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    entries = loaded
+            except Exception:
+                entries = []
+        entries.append(
+            {
+                "context": (context.user_message or "")[:240],
+                "action": action,
+                "success": bool(success),
+            }
+        )
+        atomic_json_write(log_path, entries[-200:])
+
+    @staticmethod
+    def _build_tool_path(tool_name: str, function_args: dict[str, object]) -> str:
+        function_args = function_args or {}
+        if tool_name in {"read_file", "write_file", "patch"}:
+            path = str(function_args.get("path", "") or "").strip()
+            return f"{tool_name}::path={path}" if path else tool_name
+        if tool_name == "search_files":
+            base = str(function_args.get("path", "") or function_args.get("directory", "") or "").strip()
+            query = str(function_args.get("pattern", "") or function_args.get("query", "") or "").strip()
+            if base or query:
+                return f"{tool_name}::path={base}|query={query}"
+            return tool_name
+        if tool_name == "terminal":
+            workdir = str(function_args.get("workdir", "") or "").strip()
+            command = " ".join(str(function_args.get("command", "") or "").split())
+            if workdir or command:
+                return f"{tool_name}::cwd={workdir}|cmd={command[:160]}"
+            return tool_name
+        if tool_name in {"web_search", "web_extract", "browser_navigate"}:
+            target = str(
+                function_args.get("query", "")
+                or function_args.get("url", "")
+                or function_args.get("queries", "")
+                or ""
+            ).strip()
+            return f"{tool_name}::target={target[:160]}" if target else tool_name
+        return tool_name

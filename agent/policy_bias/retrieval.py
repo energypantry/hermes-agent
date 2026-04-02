@@ -13,6 +13,8 @@ from .scoring import (
 )
 from .store import PolicyBiasStore
 
+_MIN_RETRIEVAL_SCORE = 0.25
+
 
 def _structured_match_score(
     bias: PolicyBias,
@@ -59,7 +61,12 @@ def _select_scope_balanced(
     scope_heads: list[tuple[str, tuple[PolicyBias, float]]] = []
     seen_scopes: set[str] = set()
     for bias, score in scored:
-        if bias.status != status or bias.scope not in allowed_scopes or bias.scope in seen_scopes:
+        if (
+            bias.status != status
+            or bias.scope not in allowed_scopes
+            or bias.scope in seen_scopes
+            or score < _MIN_RETRIEVAL_SCORE
+        ):
             continue
         scope_heads.append((bias.scope, (bias, score)))
         seen_scopes.add(bias.scope)
@@ -81,7 +88,12 @@ def _select_scope_balanced(
             return selected
 
     for bias, _score in scored:
-        if bias.status != status or bias.scope not in allowed_scopes or bias.id in selected_ids:
+        if (
+            bias.status != status
+            or bias.scope not in allowed_scopes
+            or bias.id in selected_ids
+            or _score < _MIN_RETRIEVAL_SCORE
+        ):
             continue
         selected.append(bias)
         selected_ids.add(bias.id)
@@ -144,6 +156,8 @@ def retrieve_biases(
             + 0.10 * structured
             + 0.10 * reward_factor
         )
+        if bias.support_count <= 1 and not bias.source_moment_ids and structured < 0.10:
+            score *= 0.35
         scored.append((bias, score))
 
     scored.sort(key=lambda item: item[1], reverse=True)

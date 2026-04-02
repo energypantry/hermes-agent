@@ -18,12 +18,13 @@ def build_decision_priors(
     if not biases and not policy_state and policy_state_plan is None:
         return "", []
 
-    lines = ["Decision Priors"]
+    lines = ["Decision Priors:"]
     injected_ids: list[str] = []
-    for bias in biases:
-        prefix = f"- [scope={bias.scope} confidence={bias.confidence:.2f}] "
-        policy_text = bias.preferred_policy
-        line = prefix + policy_text
+    for bias in list(biases or [])[:3]:
+        policy_text = (bias.preferred_policy or "").strip()
+        if not policy_text:
+            continue
+        line = f"- {policy_text}"
         candidate = "\n".join(lines + [line])
         if estimate_tokens_rough(candidate) > max_prompt_tokens:
             if injected_ids:
@@ -33,7 +34,7 @@ def build_decision_priors(
             truncated_line = None
             while len(words) > 3:
                 words = words[:-1]
-                trial = prefix + " ".join(words).rstrip(" .,;:") + "..."
+                trial = "- " + " ".join(words).rstrip(" .,;:") + "..."
                 trial_candidate = "\n".join(lines + [trial])
                 if estimate_tokens_rough(trial_candidate) <= max_prompt_tokens:
                     truncated_line = trial
@@ -45,7 +46,7 @@ def build_decision_priors(
         injected_ids.append(bias.id)
 
     state_lines = prompt_hint_lines(policy_state, plan=policy_state_plan)
-    for line in state_lines:
+    for line in state_lines[:2]:
         candidate = "\n".join(lines + [line])
         if estimate_tokens_rough(candidate) > max_prompt_tokens:
             break

@@ -441,6 +441,7 @@ def evaluate_risk_gate(
     *,
     require_inspect_first: bool,
     has_recent_inspection: bool,
+    recent_failed_signatures: Iterable[str] = (),
     user_message: str = "",
     platform: str = "",
     policy_state: list[PolicyStateDimension] | None = None,
@@ -449,6 +450,27 @@ def evaluate_risk_gate(
     keys = _candidate_keys(biases)
     state = dimension_map(policy_state)
     side_effect_level = side_effect_level_for_tool(tool_name, function_args)
+    current_signature = _tool_signature(tool_name, function_args)
+    recent_failed_signatures = set(recent_failed_signatures or [])
+
+    retry_bias_ids = [
+        bias.id
+        for bias in biases
+        if (bias.bias_candidate_key or "") == "tool_use.change_strategy_after_retries"
+    ]
+    if (
+        "tool_use.change_strategy_after_retries" in keys
+        and current_signature
+        and current_signature in recent_failed_signatures
+    ):
+        return RiskAction(
+            tool_name=tool_name,
+            decision="switch_path",
+            reason="Policy bias blocks repeating the same recently failing tool path without new inspection or a strategy change.",
+            suggested_tool=_retry_suggested_tool(tool_name),
+            bias_ids=retry_bias_ids,
+        )
+
     if side_effect_level not in {"medium", "high"}:
         return None
     if tool_name in _INSPECT_TOOLS:
@@ -456,6 +478,7 @@ def evaluate_risk_gate(
 
     bias_ids = [bias.id for bias in biases if (bias.bias_candidate_key or "") in {
         "risk.inspect_before_execute",
+        "planning.inspect_before_edit",
         "platform_specific.group_chat_caution",
     }]
     explicit_intent = _has_explicit_execute_intent(user_message, function_args)
@@ -480,6 +503,19 @@ def evaluate_risk_gate(
     confirm_score = float(execution_mode_scores.get("confirm", 0.0))
     clarify_score = float(execution_mode_scores.get("clarify", 0.0))
     clarify_tool = "clarify" if "clarify" in available_tools else None
+
+    if (
+        "planning.inspect_before_edit" in keys
+        and tool_name in {"patch", "write_file", "terminal"}
+        and not has_recent_inspection
+    ):
+        return RiskAction(
+            tool_name=tool_name,
+            decision="inspect",
+            reason="Policy bias requires reading or searching relevant code before a local mutating action.",
+            suggested_tool="read_file" if function_args.get("path") else "search_files",
+            bias_ids=bias_ids,
+        )
 
     if shared_platform and tool_name in {"send_message", "cronjob", "ha_call_service"} and not explicit_intent:
         return RiskAction(
@@ -578,3 +614,39 @@ def make_blocked_tool_result(risk_action: RiskAction) -> str:
         },
         ensure_ascii=False,
     )
+
+
+def _tool_signature(tool_name: str, function_args: dict[str, object]) -> str:
+    function_args = function_args or {}
+    if tool_name in {"read_file", "write_file", "patch"}:
+        path = str(function_args.get("path", "") or "").strip()
+        return f"{tool_name}::path={path}" if path else tool_name
+    if tool_name == "search_files":
+        base = str(function_args.get("path", "") or function_args.get("directory", "") or "").strip()
+        query = str(function_args.get("pattern", "") or function_args.get("query", "") or "").strip()
+        if base or query:
+            return f"{tool_name}::path={base}|query={query}"
+        return tool_name
+    if tool_name == "terminal":
+        workdir = str(function_args.get("workdir", "") or "").strip()
+        command = " ".join(str(function_args.get("command", "") or "").split())
+        if workdir or command:
+            return f"{tool_name}::cwd={workdir}|cmd={command[:160]}"
+        return tool_name
+    if tool_name in {"web_search", "web_extract", "browser_navigate"}:
+        target = str(
+            function_args.get("query", "")
+            or function_args.get("url", "")
+            or function_args.get("queries", "")
+            or ""
+        ).strip()
+        return f"{tool_name}::target={target[:160]}" if target else tool_name
+    return tool_name
+
+
+def _retry_suggested_tool(tool_name: str) -> str:
+    if tool_name in {"patch", "write_file", "terminal", "read_file", "search_files"}:
+        return "search_files"
+    if tool_name in {"browser_navigate", "browser_click", "browser_type", "browser_press"}:
+        return "web_search"
+    return "clarify"

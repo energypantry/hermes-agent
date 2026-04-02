@@ -29,6 +29,12 @@ def _mock_response(content: str = "done"):
     return SimpleNamespace(choices=[choice], model="test/model", usage=None)
 
 
+def _mock_tool_response(*tool_calls):
+    msg = SimpleNamespace(content="", tool_calls=list(tool_calls))
+    choice = SimpleNamespace(message=msg, finish_reason="tool_calls")
+    return SimpleNamespace(choices=[choice], model="test/model", usage=None)
+
+
 def _tool_call(name: str, arguments: str = "{}"):
     return SimpleNamespace(
         id=f"call_{name}",
@@ -126,6 +132,55 @@ def test_run_conversation_injects_decision_priors_and_ranked_tools():
         "patch",
     ]
     assert stub_engine.turn_outcomes
+
+
+def test_repo_modification_request_reads_before_patch_when_bias_engine_is_live():
+    with (
+        patch(
+            "run_agent.get_tool_definitions",
+            return_value=_make_tool_defs("patch", "read_file"),
+        ),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.client = MagicMock()
+
+    execution_order: list[str] = []
+
+    def _fake_call(_api_kwargs):
+        if not hasattr(_fake_call, "count"):
+            _fake_call.count = 0
+        _fake_call.count += 1
+        if _fake_call.count == 1:
+            return _mock_tool_response(
+                _tool_call("patch", '{"path": "app.py"}'),
+                _tool_call("read_file", '{"path": "app.py"}'),
+            )
+        return _mock_response("done")
+
+    def _fake_tool_handler(function_name, function_args, *_args, **_kwargs):
+        execution_order.append(function_name)
+        return '{"success": true}'
+
+    with (
+        patch.object(agent, "_interruptible_api_call", side_effect=_fake_call),
+        patch("run_agent.handle_function_call", side_effect=_fake_tool_handler),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_honcho_sync"),
+        patch.object(agent, "_queue_honcho_prefetch"),
+    ):
+        result = agent.run_conversation("Please modify app.py to fix the bug", sync_honcho=False)
+
+    assert result["final_response"] == "done"
+    assert execution_order[:2] == ["read_file", "patch"]
 
 
 def test_one_step_bias_forces_sequential_tool_batches():
