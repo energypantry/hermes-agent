@@ -106,7 +106,7 @@ def test_run_conversation_injects_decision_priors_and_ranked_tools():
     ):
         result = agent.run_conversation("Fix the repo file", sync_honcho=False)
 
-    assert result["response"] == "done"
+    assert result["final_response"] == "done"
     assert captured_api_kwargs["messages"][0]["role"] == "system"
     assert "Decision Priors" in captured_api_kwargs["messages"][0]["content"]
     assert [tool["function"]["name"] for tool in captured_api_kwargs["tools"]] == [

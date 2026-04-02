@@ -5603,14 +5603,19 @@ class AIAgent:
         independent: read-only tools may always share the parallel path, while
         file reads/writes may do so only when their target paths do not overlap.
         """
-        reordered_tool_calls = self._policy_reorder_tool_calls(assistant_message.tool_calls)
+        reorder_fn = getattr(type(self), "_policy_reorder_tool_calls", None)
+        if callable(reorder_fn):
+            reordered_tool_calls = reorder_fn(self, assistant_message.tool_calls)
+        else:
+            reordered_tool_calls = list(assistant_message.tool_calls or [])
         assistant_message.tool_calls = reordered_tool_calls
         tool_calls = assistant_message.tool_calls
 
         # Allow _vprint during tool execution even with stream consumers
         self._executing_tools = True
         try:
-            if self._policy_requires_sequential_tool_batch(tool_calls):
+            requires_seq_fn = getattr(type(self), "_policy_requires_sequential_tool_batch", None)
+            if callable(requires_seq_fn) and requires_seq_fn(self, tool_calls):
                 return self._execute_tool_calls_sequential(
                     assistant_message, messages, effective_task_id, api_call_count
                 )
