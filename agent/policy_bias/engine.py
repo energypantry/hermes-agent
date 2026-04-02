@@ -34,6 +34,8 @@ from .scoring import (
     side_effect_level_for_tool,
 )
 from .state_runtime import evidence_summary as state_evidence_summary
+from .state_runtime import compile_state_plan
+from .state_runtime import plan_summary
 from .state_runtime import serialize_dimensions
 from .store import PolicyBiasStore
 from .synthesis import synthesize_bias
@@ -136,10 +138,19 @@ class PolicyBiasEngine:
             include_shadow=True,
         )
         state_dimensions = self._list_policy_state_dimensions(include_shadow=True)
+        state_plan = compile_state_plan(
+            state_dimensions,
+            task_type=task_type,
+            platform=platform or "cli",
+            user_message=user_message,
+            available_tools=list(available_tools),
+            recent_failed_tools=recent_failed_tools,
+        )
         decision_priors, injected_ids = build_decision_priors(
             retrieval.active_biases,
             max_prompt_tokens=self.config.max_prompt_tokens,
             policy_state=state_dimensions,
+            policy_state_plan=state_plan,
         )
         ranked_tools, tool_deltas, planner_effects = rerank_tools(
             tool_defs,
@@ -149,9 +160,11 @@ class PolicyBiasEngine:
             platform=platform or "cli",
             recent_failed_tools=recent_failed_tools,
             policy_state=state_dimensions,
+            policy_state_plan=state_plan,
         )
         evidence_items = [bias_summary(bias) for bias in retrieval.active_biases]
         evidence_items.extend(state_evidence_summary(state_dimensions))
+        evidence_items.append(plan_summary(state_plan))
         trace = DecisionTrace(
             id=new_id("trace"),
             profile_id=self.profile_id,
@@ -207,12 +220,15 @@ class PolicyBiasEngine:
                 "turn_tool_names": [],
                 "risk_actions": [],
                 "_policy_state_dimensions": state_dimensions,
+                "_policy_state_plan": state_plan,
                 "policy_state_dimensions": serialize_dimensions(state_dimensions),
+                "policy_state_plan": plan_summary(state_plan),
                 "response_controls": derive_response_controls(
                     retrieval.active_biases,
                     task_type=task_type,
                     user_message=user_message,
                     policy_state=state_dimensions,
+                    policy_state_plan=state_plan,
                 ),
                 "response_effects": [],
                 "blocked_tool_names": [],
@@ -233,6 +249,7 @@ class PolicyBiasEngine:
             context.active_biases,
             recent_failed_tools=context.metadata.get("recent_failed_tools", []),
             policy_state=context.metadata.get("_policy_state_dimensions", []),
+            policy_state_plan=context.metadata.get("_policy_state_plan"),
         )
         if planner_effects:
             context.metadata.setdefault("planner_effects", []).extend(planner_effects)
@@ -257,6 +274,7 @@ class PolicyBiasEngine:
             user_message=context.user_message,
             platform=context.platform,
             policy_state=context.metadata.get("_policy_state_dimensions", []),
+            policy_state_plan=context.metadata.get("_policy_state_plan"),
         )
         if risk_action is not None:
             context.metadata.setdefault("risk_actions", []).append(

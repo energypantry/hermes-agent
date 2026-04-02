@@ -173,9 +173,9 @@ def _signals_for_moment(moment: PolicyMoment) -> list[_PolicySignal]:
         )
         emit(
             "verbosity_budget",
-            -0.12,
+            0.12,
             "concise_direct_feedback",
-            "Concise/direct feedback reduced the verbosity budget.",
+            "Concise/direct feedback reinforced a tighter verbosity budget.",
         )
 
     if _has_any(candidate, ("workflow_specific.structured_debugging_output",)) or (

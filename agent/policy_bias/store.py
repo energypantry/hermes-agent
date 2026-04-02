@@ -1007,7 +1007,15 @@ class PolicyBiasStore:
                 for item in trace.evidence_summary
                 if isinstance(item, dict) and item.get("kind") == "policy_state"
             ]
-            if not state_evidence:
+            state_plan = next(
+                (
+                    item
+                    for item in trace.evidence_summary
+                    if isinstance(item, dict) and item.get("kind") == "policy_state_plan"
+                ),
+                None,
+            )
+            if not state_evidence and state_plan is None:
                 continue
             serialized.append(
                 {
@@ -1021,6 +1029,7 @@ class PolicyBiasStore:
                     "risk_actions": list(trace.risk_actions),
                     "response_effects": list(trace.response_effects),
                     "active_dimensions": state_evidence,
+                    "state_plan": state_plan or {},
                     "created_at": trace.created_at,
                 }
             )

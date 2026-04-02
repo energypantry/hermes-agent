@@ -14,7 +14,7 @@ Implemented a first-class Policy Bias Engine with:
 - explainability traces
 - governance controls for enable, disable, archive, history, rollback, rebuild, and export
 - boundary metadata and audit tooling to keep policy bias separate from memory and skills
-- a V2 policy-state foundation with persistent dimensions, update history, and runtime consumption
+- a V2 policy-state foundation with persistent dimensions, update history, compiler-oriented arbitration, and runtime consumption
 - a `policy-bias state ...` CLI subtree backed by the policy-state store for inspection, rebuild, reset, and explain flows
 
 The engine is integrated into the live Hermes conversation loop in `run_agent.py`, not just a standalone prototype module.
@@ -61,7 +61,7 @@ The engine is integrated into the live Hermes conversation loop in `run_agent.py
 
 - Added dedicated SQLite database: `~/.hermes/policy_bias.db`
 - Added schema versioning through `agent/policy_bias/migrations.py`
-- Current schema version after this work: `4`
+- Current schema version after this work: `5`
 
 Schema evolution:
 
@@ -69,6 +69,7 @@ Schema evolution:
 2. v2: `decision_traces` and `disabled_reason`
 3. v3: `bias_history` for audit and rollback
 4. v4: `response_effects` on `decision_traces`
+5. v5: `policy_state_dimensions` and `policy_state_updates`
 
 Rollback notes:
 
@@ -105,9 +106,9 @@ Verification completed in this environment:
   - `tests/agent/test_policy_bias_engine.py`
   - `tests/hermes_cli/test_policy_bias_cmd.py`
   - `tests/test_run_agent_policy_bias.py`
-- current focused result after response-hook and trace fixes: `25 passed`
+- current focused result after policy-state compiler and arbitration validation: `38 passed`
 - full project `pytest` was executed in a provisioned local virtualenv and produced:
-  - `7537 passed`
+  - `7550 passed`
   - `220 skipped`
   - `1 xpassed`
   - `21 failed`
@@ -120,7 +121,8 @@ The remaining 21 full-suite failures were reproduced on the baseline `main` comm
 - semantic retrieval is lightweight token-overlap based, not embedding-based
 - rollback restores a prior bias snapshot, but there is no separate visual diff renderer yet
 - export is JSON-oriented governance output, not a full offline training pipeline on its own
-- concise/directness and findings-first biases now have deterministic response hooks, but they still do not influence planner/risk as strongly as planning/tool_use/risk scopes
+- concise/directness and findings-first biases still function more like response-policy surfaces than deep control-plan dimensions
+- the current policy-state compiler is intentionally deterministic and lightweight; it is a substrate for deeper arbitration rather than a learned policy model
 
 ## Future Work Toward Offline Weight Updates
 
@@ -128,4 +130,4 @@ The remaining 21 full-suite failures were reproduced on the baseline `main` comm
 2. bucket by scope and candidate key
 3. generate preference / policy-training examples with positive and anti-policy pairs
 4. evaluate whether certain biases should graduate from online policy control into offline training data
-5. keep the online Policy Bias Engine as the auditable, reversible control layer even after offline training begins
+5. evolve the policy-state compiler into a richer arbitration layer while keeping the online Policy Bias Engine as the auditable, reversible control plane even after offline training begins

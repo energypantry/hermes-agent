@@ -19,6 +19,7 @@ from agent.policy_bias.models import (
 )
 from agent.policy_bias.planner_hooks import evaluate_risk_gate, rerank_tools
 from agent.policy_bias.retrieval import retrieve_biases
+from agent.policy_bias.state_runtime import compile_state_plan, plan_summary
 from agent.policy_bias.store import PolicyBiasStore
 from agent.policy_bias.synthesis import (
     descriptor_qualifies_for_policy_bias,
@@ -329,6 +330,7 @@ def test_policy_state_reset_and_explain_flow(tmp_path):
             item["dimension_key"] == "inspect_tendency"
             for item in explanation["active_dimensions"]
         )
+        assert explanation["state_plan"]["kind"] == "policy_state_plan"
         assert reset_result["deleted_dimensions"] == 1
         assert store.find_policy_state_dimension(engine.profile_id, "inspect_tendency") is None
     finally:
@@ -523,6 +525,56 @@ def test_build_decision_priors_is_bounded():
     assert len(injected_ids) < len(biases)
 
 
+def test_policy_state_plan_compiles_arbitration_and_minimal_prompt_hints():
+    policy_state = [
+        _make_state_dimension("profile:test", "inspect_tendency", value=0.88, confidence=0.92),
+        _make_state_dimension("profile:test", "risk_aversion", value=0.96, confidence=0.85),
+        _make_state_dimension("profile:test", "local_first_tendency", value=0.81, confidence=0.84),
+        _make_state_dimension("profile:test", "single_step_tendency", value=0.74, confidence=0.88),
+    ]
+
+    plan = compile_state_plan(
+        policy_state,
+        task_type="repo_modification",
+        platform="cli",
+        user_message="Carefully inspect the repo and make the next step small.",
+        available_tools=["read_file", "patch", "web_search", "todo"],
+        recent_failed_tools=["patch"],
+    )
+    priors, injected_ids = build_decision_priors(
+        [],
+        max_prompt_tokens=120,
+        policy_state=policy_state,
+        policy_state_plan=plan,
+    )
+
+    assert injected_ids == []
+    assert plan.require_sequential is True
+    assert plan.preferred_risk_mode == "confirm"
+    assert plan.prompt_mode == "minimal"
+    assert len(plan.prompt_hint_keys) <= 3
+    assert "risk_aversion" in plan.prompt_hint_keys
+    assert priors.startswith("Decision Priors")
+    assert "state=risk_aversion" in priors
+    assert "state=local_first_tendency" in priors
+
+
+def test_policy_state_plan_summary_is_emitted_for_explainability():
+    plan = compile_state_plan(
+        [_make_state_dimension("profile:test", "findings_first_tendency", value=0.78)],
+        task_type="repo_modification",
+        platform="cli",
+        user_message="Review this regression and give findings first.",
+        available_tools=["read_file"],
+        recent_failed_tools=[],
+    )
+    summary = plan_summary(plan)
+
+    assert summary["kind"] == "policy_state_plan"
+    assert summary["findings_first_priority"] > 0
+    assert isinstance(summary["arbitration_notes"], list)
+
+
 def test_planner_reranking_and_risk_gate_apply_active_biases():
     biases = [
         _make_bias("profile:test", "planning.inspect_before_edit"),
@@ -688,6 +740,7 @@ def test_policy_state_influences_begin_turn_without_v1_bias_objects(tmp_path):
         assert ctx.metadata["response_controls"]["strip_leading_acknowledgement"] is True
         assert ctx.metadata["response_controls"]["findings_first_heading"] is True
         assert ctx.metadata["policy_state_dimensions"]
+        assert ctx.metadata["policy_state_plan"]["kind"] == "policy_state_plan"
     finally:
         engine.close()
 

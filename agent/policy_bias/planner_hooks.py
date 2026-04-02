@@ -6,7 +6,7 @@ import copy
 from types import SimpleNamespace
 from typing import Iterable
 
-from .models import PolicyBias, PolicyStateDimension, RiskAction, ToolWeightDelta
+from .models import PolicyBias, PolicyStateDimension, PolicyStatePlan, RiskAction, ToolWeightDelta
 from .scoring import side_effect_level_for_tool
 from .state_runtime import dimension_map
 
@@ -81,12 +81,17 @@ def rerank_tools(
     platform: str,
     recent_failed_tools: Iterable[str],
     policy_state: list[PolicyStateDimension] | None = None,
+    policy_state_plan: PolicyStatePlan | None = None,
 ) -> tuple[list[dict], list[ToolWeightDelta], list[dict]]:
     if not tool_defs:
         return [], [], []
 
     keys = _candidate_keys(biases)
     state = dimension_map(policy_state)
+    state_values = dict(policy_state_plan.effective_values) if policy_state_plan is not None else {
+        key: float(dimension.value)
+        for key, dimension in state.items()
+    }
     recent_failed = set(recent_failed_tools or [])
     deltas: list[ToolWeightDelta] = []
     planner_effects: list[dict] = []
@@ -170,7 +175,7 @@ def rerank_tools(
             delta -= 1.0
             reasons.append("recent-failing-path")
 
-        inspect_tendency = max(0.0, float(state.get("inspect_tendency").value)) if state.get("inspect_tendency") else 0.0
+        inspect_tendency = max(0.0, float(state_values.get("inspect_tendency", 0.0)))
         if inspect_tendency:
             if tool_name in _INSPECT_TOOLS:
                 delta += 0.85 * inspect_tendency
@@ -179,7 +184,7 @@ def rerank_tools(
                 delta -= 0.20 * inspect_tendency
                 reasons.append("policy-state:defer-mutation")
 
-        risk_aversion = max(0.0, float(state.get("risk_aversion").value)) if state.get("risk_aversion") else 0.0
+        risk_aversion = max(0.0, float(state_values.get("risk_aversion", 0.0)))
         if risk_aversion:
             if tool_name in _INSPECT_TOOLS:
                 delta += 0.55 * risk_aversion
@@ -188,7 +193,7 @@ def rerank_tools(
                 delta -= 0.35 * risk_aversion
                 reasons.append("policy-state:risk-penalty")
 
-        local_first = max(0.0, float(state.get("local_first_tendency").value)) if state.get("local_first_tendency") else 0.0
+        local_first = max(0.0, float(state_values.get("local_first_tendency", 0.0)))
         if local_first and task_type == "repo_modification":
             if tool_name in _LOCAL_TOOLS:
                 delta += 0.85 * local_first
@@ -197,7 +202,7 @@ def rerank_tools(
                 delta -= 0.65 * local_first
                 reasons.append("policy-state:penalize-external")
 
-        decomposition = max(0.0, float(state.get("decomposition_tendency").value)) if state.get("decomposition_tendency") else 0.0
+        decomposition = max(0.0, float(state_values.get("decomposition_tendency", 0.0)))
         if decomposition:
             if tool_name in _PLANNING_TOOLS:
                 delta += 0.90 * decomposition
@@ -206,12 +211,12 @@ def rerank_tools(
                 delta -= 0.25 * decomposition
                 reasons.append("policy-state:delay-execution")
 
-        retry_switch = max(0.0, float(state.get("retry_switch_tendency").value)) if state.get("retry_switch_tendency") else 0.0
+        retry_switch = max(0.0, float(state_values.get("retry_switch_tendency", 0.0)))
         if retry_switch and tool_name in recent_failed:
             delta -= 1.10 * retry_switch
             reasons.append("policy-state:avoid-retry-loop")
 
-        shared_channel_caution = max(0.0, float(state.get("shared_channel_caution").value)) if state.get("shared_channel_caution") else 0.0
+        shared_channel_caution = max(0.0, float(state_values.get("shared_channel_caution", 0.0)))
         if shared_channel_caution and _looks_shared_platform(platform):
             if tool_name in _MUTATING_TOOLS | {"send_message", "cronjob", "ha_call_service"}:
                 delta -= 0.40 * shared_channel_caution
@@ -239,14 +244,19 @@ def rerank_tool_calls(
     *,
     recent_failed_tools: Iterable[str],
     policy_state: list[PolicyStateDimension] | None = None,
+    policy_state_plan: PolicyStatePlan | None = None,
 ) -> tuple[list[tuple[object, str, dict]], list[dict]]:
     if len(parsed_calls) <= 1:
         return parsed_calls, []
 
     keys = _candidate_keys(biases)
     state = dimension_map(policy_state)
+    state_values = dict(policy_state_plan.effective_values) if policy_state_plan is not None else {
+        key: float(dimension.value)
+        for key, dimension in state.items()
+    }
     recent_failed = set(recent_failed_tools or [])
-    if not keys and not state:
+    if not keys and not state and policy_state_plan is None:
         return parsed_calls, []
 
     def _priority(item: tuple[object, str, dict]) -> tuple[int, int]:
@@ -269,21 +279,26 @@ def rerank_tool_calls(
                 score -= 6
         if "tool_use.change_strategy_after_retries" in keys and tool_name in recent_failed:
             score -= 25
-        inspect_tendency = max(0.0, float(state.get("inspect_tendency").value)) if state.get("inspect_tendency") else 0.0
+        inspect_tendency = max(0.0, float(state_values.get("inspect_tendency", 0.0)))
         if inspect_tendency:
             if tool_name in _INSPECT_TOOLS:
                 score += int(18 * inspect_tendency)
             elif tool_name in _MUTATING_TOOLS:
                 score -= int(7 * inspect_tendency)
-        decomposition = max(0.0, float(state.get("decomposition_tendency").value)) if state.get("decomposition_tendency") else 0.0
+        decomposition = max(0.0, float(state_values.get("decomposition_tendency", 0.0)))
         if decomposition:
             if tool_name in _PLANNING_TOOLS:
                 score += int(16 * decomposition)
             elif tool_name in _MUTATING_TOOLS | _EXTERNAL_TOOLS:
                 score -= int(6 * decomposition)
-        retry_switch = max(0.0, float(state.get("retry_switch_tendency").value)) if state.get("retry_switch_tendency") else 0.0
+        retry_switch = max(0.0, float(state_values.get("retry_switch_tendency", 0.0)))
         if retry_switch and tool_name in recent_failed:
             score -= int(18 * retry_switch)
+        if policy_state_plan is not None and policy_state_plan.require_sequential:
+            if tool_name in _PLANNING_TOOLS | _INSPECT_TOOLS:
+                score += 8
+            elif tool_name in _MUTATING_TOOLS | _EXTERNAL_TOOLS:
+                score -= 4
         return (score, 0)
 
     ordered = sorted(parsed_calls, key=_priority, reverse=True)
@@ -310,6 +325,7 @@ def evaluate_risk_gate(
     user_message: str = "",
     platform: str = "",
     policy_state: list[PolicyStateDimension] | None = None,
+    policy_state_plan: PolicyStatePlan | None = None,
 ) -> RiskAction | None:
     keys = _candidate_keys(biases)
     state = dimension_map(policy_state)
@@ -325,16 +341,17 @@ def evaluate_risk_gate(
     }]
     explicit_intent = _has_explicit_execute_intent(user_message, function_args)
     ambiguous = _is_high_ambiguity_request(user_message)
-    shared_channel_state = (
-        float(state.get("shared_channel_caution").value)
-        if state.get("shared_channel_caution")
-        else 0.0
-    )
+    state_values = dict(policy_state_plan.effective_values) if policy_state_plan is not None else {
+        key: float(dimension.value)
+        for key, dimension in state.items()
+    }
+    shared_channel_state = float(state_values.get("shared_channel_caution", 0.0))
     shared_platform = (
         "platform_specific.group_chat_caution" in keys or shared_channel_state >= 0.35
     ) and _looks_shared_platform(platform)
-    risk_aversion = max(0.0, float(state.get("risk_aversion").value)) if state.get("risk_aversion") else 0.0
-    inspect_tendency = max(0.0, float(state.get("inspect_tendency").value)) if state.get("inspect_tendency") else 0.0
+    risk_aversion = max(0.0, float(state_values.get("risk_aversion", 0.0)))
+    inspect_tendency = max(0.0, float(state_values.get("inspect_tendency", 0.0)))
+    preferred_risk_mode = policy_state_plan.preferred_risk_mode if policy_state_plan is not None else "direct"
 
     if shared_platform and tool_name in {"send_message", "cronjob", "ha_call_service"} and not explicit_intent:
         return RiskAction(
@@ -345,9 +362,8 @@ def evaluate_risk_gate(
             bias_ids=bias_ids,
         )
 
-    require_state_inspect = (
-        require_inspect_first
-        and (risk_aversion >= 0.35 or inspect_tendency >= 0.45)
+    require_state_inspect = require_inspect_first and (
+        risk_aversion >= 0.35 or inspect_tendency >= 0.45 or preferred_risk_mode in {"inspect", "confirm"}
     )
     if "risk.inspect_before_execute" not in keys and not require_state_inspect:
         return None
@@ -355,6 +371,7 @@ def evaluate_risk_gate(
         if side_effect_level == "high" and (
             ambiguous
             or risk_aversion >= 0.55
+            or preferred_risk_mode == "confirm"
             or (tool_name in {"send_message", "cronjob", "ha_call_service"} and not explicit_intent)
         ):
             return RiskAction(
@@ -378,7 +395,7 @@ def evaluate_risk_gate(
         decision = "simulate"
         reason = "Policy bias requires a simulate/preview step before taking a browser action with side effects."
     elif tool_name in {"send_message", "cronjob", "ha_call_service"} and (
-        ambiguous or not explicit_intent or risk_aversion >= 0.55
+        ambiguous or not explicit_intent or risk_aversion >= 0.55 or preferred_risk_mode == "confirm"
     ):
         decision = "confirm"
         reason = "Policy bias requires stronger certainty before executing this external side-effect action."

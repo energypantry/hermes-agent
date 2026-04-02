@@ -72,12 +72,21 @@ hermes policy-bias state explain <trace_id>
 
 These commands coexist with V1 bias governance and now speak to the policy-state backend directly. They still fail gracefully in mixed deployments where the newer policy-state store APIs are unavailable.
 
+Operationally, the state layer is treated as a control substrate, not a second memory file:
+
+- `list` and `inspect` show the durable policy tendencies
+- `updates` shows how those tendencies evolved
+- `explain` shows the turn-local arbitration result and the downstream surfaces it shaped
+- `rebuild` replays the substrate from moments when you want to recompute the control plan
+- `reset` clears the substrate instead of patching a single prompt hint
+
 ## What To Watch
 
 Useful log events:
 
 - moment creation
 - synthesis decisions
+- state updates and arbitration outputs
 - retrieval hits
 - planner/tool weighting deltas
 - risk gating blocks
@@ -129,9 +138,10 @@ If a bias does not seem to affect behavior:
 2. Check `scopes_enabled`
 3. Inspect whether the bias is `active` vs `shadow`
 4. Review recent decision traces with `explain`
-5. Check whether prompt injection was token-capped
-6. Check whether response-policy effects were recorded in the trace when the bias should shape the final answer
-7. Check whether the task/tool context actually matches the bias signature
+5. Check whether the policy-state compiler already encoded the behavior into the runtime plan
+6. Check whether prompt translation was token-capped or skipped because the state compiler already emitted enough control output
+7. Check whether response-policy effects were recorded in the trace when the bias should shape the final answer
+8. Check whether the task/tool context actually matches the bias signature
 
 If you are checking for duplicate storage across learning layers:
 

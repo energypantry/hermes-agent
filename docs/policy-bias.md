@@ -97,6 +97,12 @@ Retrieved active biases are applied in four places:
 4. Risk behavior
    External or mutating tools can be forced into inspect, simulate, or explicit-confirm paths before execution.
 
+With V2 policy state, the same surfaces are first fed by a compiled state plan:
+
+- state dimensions can raise or lower tool weights even when no named bias exists yet
+- arbitration can suppress low-confidence signals before they become prompt text
+- prompt translation is used only when the runtime still needs a compact hint for the model
+
 Hermes now also applies deterministic response controls for relevant active biases:
 
 - concise/directness biases can strip low-signal acknowledgements and trailing filler offers from the final answer
@@ -217,7 +223,18 @@ V1 remains the source of:
 V2 adds:
 
 - persistent policy dimensions such as inspect tendency, risk aversion, and directness budget
+- a policy-state compiler and arbitration layer that turns state into runtime action weights and gates
 - state-first runtime control before prompt translation
 - a separate audit trail for low-bandwidth policy updates
+
+The intended control flow is:
+
+`moments -> policy state -> compiler / arbitration -> runtime controls -> optional prompt translation`
+
+In that flow:
+
+- policy state is the source of truth
+- compiler output is the decision surface
+- `Decision Priors` is the fallback translation surface
 
 Operationally, the CLI now exposes a `policy-bias state ...` subtree backed by the new policy-state store. It coexists with the current V1 bias commands, and still degrades gracefully if a deployment is missing the newer backend methods.

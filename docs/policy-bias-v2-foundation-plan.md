@@ -2,12 +2,12 @@
 
 ## Goal
 
-Evolve the current Policy Bias Engine from a bias-object and prompt-assisted control system into a long-lived policy-state layer that behaves more like durable agent "substrate" or "background inclination" than explicit prompt text.
+Evolve the current Policy Bias Engine from a bias-object and prompt-assisted control system into a long-lived policy-state layer that is compiled into runtime policy decisions rather than re-expressed as prompt text.
 
 The key shift is:
 
 - V1: `moments -> bias objects -> retrieval -> prompt/hook application`
-- V2: `moments -> policy state updates -> low-bandwidth control surfaces -> optional prompt translation`
+- V2: `moments -> policy state updates -> policy-state compiler / arbitration -> low-bandwidth control surfaces -> optional prompt translation`
 
 This does **not** mean immediate model fine-tuning. It means Hermes gains a persistent, profile-scoped internal policy state that can shape behavior with far less prompt dependence.
 
@@ -40,7 +40,7 @@ V1 design principle:
 
 V2 design principle:
 
-- durable policy priors should remain explainable, but the *primary runtime representation* should be structured policy state, not natural-language bias text
+- durable policy priors should remain explainable, but the *primary runtime representation* should be structured policy state, with a compiler/arbitration layer producing runtime controls and only then prompt hints
 
 That means:
 
@@ -56,7 +56,7 @@ Introduce a new first-class layer:
 This layer is profile-scoped, persistent, decayed over time, evidence-backed, and continuously updated by moments.
 
 `PolicyState` is not a collection of prose rules.
-It is a compact vector-like state object composed of policy dimensions.
+It is a compact vector-like state object composed of policy dimensions that feed a policy-state compiler.
 
 Examples:
 
@@ -72,6 +72,34 @@ Examples:
 - `shared_channel_caution`
 
 Each dimension persists across turns and profiles, changes gradually, and influences multiple downstream systems.
+
+### 2.5 Policy-State Compiler
+
+Add a runtime compiler that turns policy state into a per-turn policy plan.
+
+Inputs:
+
+- active policy dimensions
+- task type
+- platform
+- available tools
+- recent failure and inspection history
+
+Outputs:
+
+- tool weights and ordering deltas
+- risk thresholds and gates
+- response budget and structure hints
+- a bounded prompt translation payload when needed
+
+The compiler should resolve conflicts deterministically. When dimensions disagree, arbitration should prefer the combination of:
+
+- task relevance
+- confidence
+- support count
+- recency
+- side-effect risk
+- profile-specific overrides
 
 ## Proposed Architecture
 
@@ -153,7 +181,7 @@ The main V2 change:
 - risk gate
 - response controls
 
-should read from `PolicyState` first.
+should read from the compiled `PolicyState` plan first.
 
 Examples:
 
@@ -170,13 +198,14 @@ Examples:
 
 New role:
 
-- translate the highest-signal state dimensions into compact prompt hints only when needed
+- translate the surviving compiler output into compact prompt hints only when needed
 
 That means:
 
 - not every dimension should become prompt text
 - prompt translation should be late, sparse, and bounded
 - runtime control should not depend on prompt translation
+- prompt text is a fallback output of the compiler, not the source of truth
 
 ### 6. Governance Layer
 
@@ -186,6 +215,7 @@ Operators must be able to inspect:
 
 - current policy dimensions
 - their values and confidence
+- the compiler/arbitration inputs that shaped the current plan
 - which moments changed them
 - how they affected planner/tool/risk/response decisions
 - how they decayed over time
@@ -196,6 +226,7 @@ Governance needs:
 - inspect one dimension
 - show recent updates
 - replay / recompute state
+- inspect the compiled policy plan for a turn
 - reset one dimension
 - reset all policy state for a profile
 - compare V1 bias objects vs V2 state effects
@@ -279,7 +310,7 @@ This reduces migration risk.
 
 Once V2 proves stable:
 
-- planner/tool/risk/response controls read primarily from `PolicyState`
+- planner/tool/risk/response controls read primarily from the compiled `PolicyState` plan
 - bias object retrieval becomes secondary / governance-facing
 - prompt translation only emits top few translated priors
 
@@ -341,7 +372,8 @@ Or, if cleaner:
 ### Workstream C: Runtime Consumption
 
 - make planner/tool/risk/response controls read policy state
-- add state-aware prompt translation
+- add state-aware prompt translation as a fallback output
+- add deterministic arbitration for conflicting dimensions
 - preserve V1 fallback behavior
 
 ### Workstream D: Governance and Explainability
@@ -362,8 +394,9 @@ Or, if cleaner:
 V2 is successful when:
 
 - Hermes has persistent policy state independent of memory and skills
-- the primary runtime driver is structured policy state rather than prompt text
+- the primary runtime driver is a compiled policy plan derived from structured policy state rather than prompt text
 - `Decision Priors` becomes a secondary translation layer
+- policy-state arbitration is deterministic, bounded, and explainable
 - planner/tool/risk/response behavior can be explained via state dimensions
 - V1 remains backward-compatible during transition
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-from .models import PolicyBias, PolicyStateDimension
+from .models import PolicyBias, PolicyStateDimension, PolicyStatePlan
 from .state_runtime import dimension_map
 
 _LEADING_ACK_PATTERNS = (
@@ -56,7 +56,11 @@ def derive_response_controls(
     task_type: str,
     user_message: str,
     policy_state: Iterable[PolicyStateDimension] | None = None,
+    policy_state_plan: PolicyStatePlan | None = None,
 ) -> dict[str, object]:
+    if policy_state_plan is not None and policy_state_plan.response_controls:
+        return dict(policy_state_plan.response_controls)
+
     keys = {
         bias.bias_candidate_key or ""
         for bias in biases

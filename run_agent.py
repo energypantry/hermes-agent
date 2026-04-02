@@ -5729,6 +5729,10 @@ class AIAgent:
         if not ctx:
             return False
 
+        state_plan = ctx.metadata.get("_policy_state_plan")
+        if getattr(state_plan, "require_sequential", False):
+            return True
+
         keys = {
             bias.bias_candidate_key or ""
             for bias in ctx.active_biases
