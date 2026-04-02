@@ -103,6 +103,7 @@ With V2 policy state, the same surfaces are first fed by a compiled state plan:
 - arbitration can suppress low-confidence signals before they become prompt text
 - prompt translation is used only when the runtime still needs a compact hint for the model
 - action budgets can cap how many tool calls Hermes executes before the next model turn, plus how many of those calls may run in parallel
+- execution-mode scores can bias each turn toward `direct`, `inspect`, `simulate`, `confirm`, or `clarify` before any prompt hint is emitted
 
 Hermes now also applies deterministic response controls for relevant active biases:
 

@@ -139,6 +139,23 @@ Examples:
 
 This makes policy state feel less like prompt text and more like a low-bandwidth behavioral substrate that governs how much the agent acts before re-evaluating.
 
+### 2.8 V2.3 Execution-Mode Scoring
+
+The next upgrade is to stop relying only on discrete runtime modes and instead compile a stable execution-mode score map for each turn.
+
+The compiler should now also emit:
+
+- `execution_mode_scores`
+- `runtime_coverage_score`
+
+Examples:
+
+- risky ambiguous shared-channel turns should push `confirm` and `clarify` scores above `direct`
+- browser-side-effect turns should preserve a strong `simulate` default even when inspection is also valuable
+- prompt translation should stay off when runtime coverage is already strong enough to carry planner, risk, response, and execution-budget behavior
+
+This pushes the substrate closer to an internal behavioral field: the agent is no longer just picking a named mode, it is carrying graded execution preferences that can be consumed by downstream control surfaces.
+
 ## Proposed Architecture
 
 ### 1. Moment Layer

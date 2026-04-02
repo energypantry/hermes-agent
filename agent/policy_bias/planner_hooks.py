@@ -405,6 +405,12 @@ def evaluate_risk_gate(
     preferred_risk_mode = policy_state_plan.preferred_risk_mode if policy_state_plan is not None else "direct"
     clarify_priority = policy_state_plan.clarify_priority if policy_state_plan is not None else 0.0
     available_tools = set(policy_state_plan.available_tools) if policy_state_plan is not None else set()
+    execution_mode_scores = dict(policy_state_plan.execution_mode_scores) if policy_state_plan is not None else {}
+    direct_score = float(execution_mode_scores.get("direct", 0.0))
+    inspect_score = float(execution_mode_scores.get("inspect", 0.0))
+    simulate_score = float(execution_mode_scores.get("simulate", 0.0))
+    confirm_score = float(execution_mode_scores.get("confirm", 0.0))
+    clarify_score = float(execution_mode_scores.get("clarify", 0.0))
     clarify_tool = "clarify" if "clarify" in available_tools else None
 
     if shared_platform and tool_name in {"send_message", "cronjob", "ha_call_service"} and not explicit_intent:
@@ -426,6 +432,7 @@ def evaluate_risk_gate(
             ambiguous
             or risk_aversion >= 0.55
             or preferred_risk_mode == "confirm"
+            or confirm_score >= max(direct_score + 0.05, 0.55)
             or (tool_name in {"send_message", "cronjob", "ha_call_service"} and not explicit_intent)
         ):
             return RiskAction(
@@ -448,21 +455,36 @@ def evaluate_risk_gate(
     decision = "inspect"
     reason = "Policy bias requires an inspect/search step before executing a mutating or external action."
     if tool_name in {"browser_click", "browser_type", "browser_press"}:
-        decision = "simulate"
-        reason = "Policy bias requires a simulate/preview step before taking a browser action with side effects."
-    elif tool_name in {"send_message", "cronjob", "ha_call_service"} and (
-        ambiguous or not explicit_intent or risk_aversion >= 0.55 or preferred_risk_mode == "confirm"
-    ):
-        decision = "confirm"
-        if clarify_tool and ambiguous and clarify_priority >= 0.45:
-            reason = "Policy bias requires clarifying intent before executing this external side-effect action."
-        else:
-            reason = "Policy bias requires stronger certainty before executing this external side-effect action."
+        if confirm_score >= max(simulate_score + 0.10, 0.82) and (ambiguous or shared_platform):
+            decision = "confirm"
+            reason = "Policy state currently prefers confirmation before this browser side-effect action."
+        elif simulate_score >= 0.35 or not execution_mode_scores:
+            decision = "simulate"
+            reason = "Policy state currently prefers a simulate/preview step before this browser side-effect action."
+    elif tool_name in {"send_message", "cronjob", "ha_call_service"}:
+        if clarify_tool and ambiguous and clarify_score >= max(confirm_score - 0.05, 0.45):
+            decision = "confirm"
+            reason = "Policy state prefers clarifying intent before this external side-effect action."
+        elif (
+            ambiguous
+            or not explicit_intent
+            or risk_aversion >= 0.55
+            or preferred_risk_mode == "confirm"
+            or confirm_score >= max(inspect_score, direct_score + 0.05, 0.45)
+        ):
+            decision = "confirm"
+            reason = "Policy state prefers stronger certainty before this external side-effect action."
     elif tool_name == "terminal":
         command = str(function_args.get("command", "") or "").lower()
         if any(token in command for token in ("rm ", "git reset", "git clean", "truncate ", "dd ")):
             decision = "confirm"
-            reason = "Policy bias requires explicit confirmation before destructive terminal commands."
+            reason = "Policy state prefers explicit confirmation before destructive terminal commands."
+        elif inspect_score >= max(direct_score, 0.35):
+            decision = "inspect"
+            reason = "Policy state prefers verifying the terminal action context before execution."
+    elif side_effect_level == "high" and confirm_score >= max(inspect_score + 0.12, direct_score + 0.12, 0.72):
+        decision = "confirm"
+        reason = "Policy state currently prefers confirmation before this high-side-effect action."
 
     return RiskAction(
         tool_name=tool_name,

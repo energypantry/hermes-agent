@@ -92,6 +92,16 @@ def _rounded_weights(weights: dict[str, float]) -> dict[str, float]:
     return {key: round(float(value), 3) for key, value in weights.items() if abs(float(value)) > 1e-6}
 
 
+def _rounded_scores(scores: dict[str, float]) -> dict[str, float]:
+    return {key: round(float(value), 3) for key, value in scores.items()}
+
+
+def _top_score_key(scores: dict[str, float]) -> str:
+    if not scores:
+        return "direct"
+    return max(scores.items(), key=lambda item: (float(item[1]), item[0]))[0]
+
+
 def active_dimensions(
     dimensions: Iterable[PolicyStateDimension] | None,
     *,
@@ -374,6 +384,35 @@ def compile_state_plan(
         }
     )
 
+    execution_mode_scores = _rounded_scores(
+        {
+            "direct": _clamp01(
+                (1.0 - execution_caution) * 0.92
+                + (0.12 if not ambiguous and shared_caution < 0.2 else 0.0)
+                - (0.18 if planner_mode == "clarify_first" else 0.0)
+            ),
+            "inspect": _clamp01(
+                (0.68 * planning_priority)
+                + (0.42 * execution_caution)
+                + (0.16 if planner_mode == "inspect_first" else 0.0)
+            ),
+            "simulate": _clamp01(
+                (0.58 * execution_caution)
+                + (0.18 * planning_priority)
+                + (0.14 * shared_caution)
+                + (0.10 if planner_mode == "inspect_first" else 0.0)
+            ),
+            "confirm": _clamp01(
+                (0.86 * execution_caution)
+                + (0.16 * shared_caution)
+                + (0.08 if planner_mode == "clarify_first" else 0.0)
+            ),
+            "clarify": _clamp01(
+                clarify_priority + (0.12 if planner_mode == "clarify_first" else 0.0)
+            ),
+        }
+    )
+
     runtime_surfaces: list[str] = []
     if planner_mode != "direct" or tool_class_weights:
         runtime_surfaces.append("planner")
@@ -383,6 +422,13 @@ def compile_state_plan(
         runtime_surfaces.append("response")
     if max_tool_calls_per_turn > 0 or max_parallel_tools > 0:
         runtime_surfaces.append("execution_budget")
+
+    runtime_coverage_score = _clamp01(
+        (0.34 * max(planning_priority, float(bool(tool_class_weights))))
+        + (0.28 * max(execution_mode_scores.get("inspect", 0.0), execution_mode_scores.get("confirm", 0.0), execution_mode_scores.get("clarify", 0.0)))
+        + (0.18 * max(response_directness, findings_first_priority, single_step_priority))
+        + (0.20 * max(float(bool(max_tool_calls_per_turn)), float(bool(max_parallel_tools and max_parallel_tools < 3))))
+    )
 
     prompt_hint_keys: list[str] = []
     if execution_caution >= 0.72:
@@ -400,14 +446,20 @@ def compile_state_plan(
     prompt_hint_keys = list(dict.fromkeys(prompt_hint_keys))[:3]
 
     prompt_mode = "off"
-    if prompt_hint_keys and not (
-        len(runtime_surfaces) >= 3
-        and (planner_mode != "direct" or preferred_risk_mode != "direct")
-    ):
+    if prompt_hint_keys and runtime_coverage_score < 0.72:
         prompt_mode = "minimal"
         notes.append("Prompt translation is reduced to only the highest-signal state hints.")
     elif prompt_hint_keys:
         notes.append("Runtime coverage is strong enough to suppress state prompt translation for this turn.")
+    if runtime_coverage_score >= 0.72:
+        notes.append(
+            f"Runtime coverage score {runtime_coverage_score:.2f} keeps policy state primarily off-prompt."
+        )
+    dominant_execution_mode = _top_score_key(execution_mode_scores)
+    if dominant_execution_mode != "direct":
+        notes.append(
+            f"Execution-mode scoring currently leans toward {dominant_execution_mode} before direct action."
+        )
 
     return PolicyStatePlan(
         active_dimensions=active,
@@ -420,6 +472,8 @@ def compile_state_plan(
         clarify_priority=clarify_priority,
         max_tool_calls_per_turn=max_tool_calls_per_turn,
         max_parallel_tools=max_parallel_tools,
+        execution_mode_scores=execution_mode_scores,
+        runtime_coverage_score=runtime_coverage_score,
         response_directness=response_directness,
         findings_first_priority=findings_first_priority,
         single_step_priority=single_step_priority,
@@ -448,6 +502,8 @@ def plan_summary(plan: PolicyStatePlan) -> dict[str, object]:
         "clarify_priority": round(plan.clarify_priority, 3),
         "max_tool_calls_per_turn": int(plan.max_tool_calls_per_turn),
         "max_parallel_tools": int(plan.max_parallel_tools),
+        "execution_mode_scores": dict(plan.execution_mode_scores),
+        "runtime_coverage_score": round(plan.runtime_coverage_score, 3),
         "response_directness": round(plan.response_directness, 3),
         "findings_first_priority": round(plan.findings_first_priority, 3),
         "single_step_priority": round(plan.single_step_priority, 3),
