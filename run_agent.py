@@ -8162,7 +8162,66 @@ class AIAgent:
                     }
                 elif hasattr(self, "_codex_incomplete_retries"):
                     self._codex_incomplete_retries = 0
-                
+
+                # Fallback for local DeepSeek-style endpoints that emit tool calls
+                # as DSML markup inside assistant text instead of structured
+                # tool_calls objects.
+                if (
+                    not assistant_message.tool_calls
+                    and isinstance(getattr(assistant_message, "content", None), str)
+                    and "<｜DSML｜" in (assistant_message.content or "")
+                ):
+                    try:
+                        dsml_text = assistant_message.content or ""
+                        invoke_pattern = re.compile(
+                            r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)</｜DSML｜invoke>',
+                            re.DOTALL,
+                        )
+                        param_pattern = re.compile(
+                            r'<｜DSML｜parameter\s+name="([^"]+)"(?:\s+string="true")?\s*>(.*?)</｜DSML｜parameter>',
+                            re.DOTALL,
+                        )
+
+                        parsed_calls = []
+                        for match in invoke_pattern.finditer(dsml_text):
+                            tool_name = (match.group(1) or "").strip()
+                            invoke_body = match.group(2) or ""
+                            args_dict = {}
+                            for param_match in param_pattern.finditer(invoke_body):
+                                key = (param_match.group(1) or "").strip()
+                                value = (param_match.group(2) or "").strip()
+                                if key:
+                                    args_dict[key] = value
+
+                            if tool_name:
+                                parsed_calls.append(
+                                    SimpleNamespace(
+                                        id=f"call_{uuid.uuid4().hex[:8]}",
+                                        type="function",
+                                        function=SimpleNamespace(
+                                            name=tool_name,
+                                            arguments=json.dumps(args_dict, ensure_ascii=False),
+                                        ),
+                                    )
+                                )
+
+                        if parsed_calls:
+                            cleaned = re.sub(
+                                r"<｜DSML｜function_calls>.*?</｜DSML｜function_calls>",
+                                "",
+                                dsml_text,
+                                flags=re.DOTALL,
+                            ).strip()
+                            assistant_message.content = cleaned or ""
+                            assistant_message.tool_calls = parsed_calls
+                            if self.verbose_logging:
+                                logger.info(
+                                    "Parsed %d DSML tool call(s) from assistant content",
+                                    len(parsed_calls),
+                                )
+                    except Exception as dsml_err:
+                        logger.debug("DSML fallback parse failed: %s", dsml_err)
+
                 # Check for tool calls
                 if assistant_message.tool_calls:
                     if not self.quiet_mode:

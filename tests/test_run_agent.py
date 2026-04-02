@@ -1431,6 +1431,32 @@ class TestRunConversation:
         assert result["final_response"] == "Done searching"
         assert result["api_calls"] == 2
 
+    def test_dsml_tool_calls_fallback(self, agent):
+        self._setup_agent(agent)
+        resp1 = _mock_response(
+            content=(
+                "<｜DSML｜function_calls>"
+                '<｜DSML｜invoke name="web_search">'
+                '<｜DSML｜parameter name="q" string="true">hermes agent</｜DSML｜parameter>'
+                "</｜DSML｜invoke>"
+                "</｜DSML｜function_calls>"
+            ),
+            finish_reason="stop",
+        )
+        resp2 = _mock_response(content="Done searching", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [resp1, resp2]
+        with (
+            patch("run_agent.handle_function_call", return_value="search result") as mock_hfc,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("search something")
+        assert result["final_response"] == "Done searching"
+        assert result["api_calls"] == 2
+        mock_hfc.assert_called_once()
+        assert mock_hfc.call_args.args[:2] == ("web_search", {"q": "hermes agent"})
+
     def test_interrupt_breaks_loop(self, agent):
         self._setup_agent(agent)
 
